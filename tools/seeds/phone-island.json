@@ -1,0 +1,27 @@
+{
+  "base": "/private/tmp/claude-501/-Users-xiaochoumao-unixnu-13t/5559c563-618d-4813-9848-be3768908d8c/scratchpad/fix2/gpu-slots-work/seeds/data-a830-phone-cache-noprime-posters.dbrdisk",
+  "base_bytes": 1073741824,
+  "base_sha256": "5e3bf29aba83ecf5c9df2ff28a651f5212371c0ff8d0d56c0b5a5f66a1538d94",
+  "container_bytes": 2147483648,
+  "disabled_jobs": [
+    "com.apple.CommCenter",
+    "com.apple.PerfPowerServices",
+    "com.apple.bluetoothd",
+    "com.apple.fairplayd.A2",
+    "com.apple.identityservicesd",
+    "com.apple.iomfb_fdr_loader",
+    "com.apple.locationd",
+    "com.apple.watchdogd"
+  ],
+  "wallpaper": "/private/var/ngpu/wallpaper-collections",
+  "keyboard": "/private/var/ngpu/textinputui-layouts",
+  "used_kib": 42604,
+  "available_kib": 2046308,
+  "output": {
+    "bytes": 2147483648,
+    "sha256": "cb402100ec6844693af315ca06e48d1a4fe7aee23d1e6a7923c10f1ff6b2fbc0",
+    "encoded_bytes": 44025056,
+    "encoded_sha256": "04fbde5e58a05ae670c78fa0c2773b6e92e2898e44e7e248288585aabbcded22",
+    "packed": true
+  }
+}

@@ -1,0 +1,35 @@
+phone-27-cpu-start-clean.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 59 块（cpu.c cpu_start）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，SMP 防御。
+作用：从核在 MMU 关闭时读 ResetHandlerData、const_boot_args、cpu_ttep，这几个是启动时写的，
+可能还脏在启动核缓存里，这里写回到 PoC。
+与我方的关系：PaganiArmCpu/ArmCpu.cpp 的 cleanToMemory 在 10063 上已做同样的事。27 上 ArmCpu 要重编，
+先在内核里也带一份，重复写回没有副作用。
+
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index 00035f6..eb62255 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -953,6 +953,18 @@ cpu_start(int cpu)
+ 
+ 		flush_dcache((vm_offset_t)&CpuDataEntries[cpu], sizeof(cpu_data_entry_t), FALSE);
+ 		flush_dcache((vm_offset_t)cpu_data_ptr, sizeof(cpu_data_t), FALSE);
++#if !defined(APPLE_ARM64_ARCH_FAMILY)
++		{
++			/* UniXNU: the new core reads these with its MMU off, uncached, from DRAM (reset_vector, start_cpu, common_start):
++			 * written once at boot, they can still be dirty in this core's caches, and a core that reads a stale
++			 * ResetHandlerData, const_boot_args or cpu_ttep finds no cpu data or builds a wrong address space and spins in the
++			 * early vectors. Write them back to the point of coherency, as the cpu data above. */
++			extern boot_args const_boot_args;
++			flush_dcache((vm_offset_t)&ResetHandlerData, sizeof(ResetHandlerData), FALSE);
++			flush_dcache((vm_offset_t)&const_boot_args, sizeof(const_boot_args), FALSE);
++			flush_dcache((vm_offset_t)&cpu_ttep, sizeof(cpu_ttep), FALSE);
++		}
++#endif
+ #if CONFIG_SPTM
+ 		/**
+ 		 * On SPTM devices, CTRR is configured entirely by the SPTM. Due to this, this logic

@@ -1,0 +1,115 @@
+pagani-27-early-progress-t0sz.patch（本项目，13T 专用）
+
+来源：本项目。配合 phone-27-user-t0sz.patch 使用，替代 sheng 的 arm_init.c 和 arm_init_tramp 两块。
+
+问题：sheng 的做法是 arm_init 入口写 TCR_EL1_KVA_ENTRY（T0SZ=17 且 EPD0=1）。13T 上这有两个后果：
+1. BootProgress 的 framebuffer 在 arm_vm_init 之前是物理地址，经 TTBR0 恒等映射访问（BootProgress.c:1097-1125），
+   TTBR0 走表一关，S4、S5、arm_vm_init enter 这些进度一画屏就缺页。
+2. Entry.S 的 Lfatal 把 TTBR0 设成 bootstrap_pagetables 后跳回物理地址关 MMU。T0SZ 已改成 17 而表还是 3 级格式，
+   跳转取指失败，VBAR 又指回 Lfatal，变成无声死循环。
+
+做法：TCR 从第一次开 MMU 起就用 T0SZ_USER，V=P 表也做成 4 级：
+- start.s：bootstrap_pagetables 第一页当 L0 根，L0[0] 指向 V=P 的 L1。KVA 的 L1 还在 x25 + PGBYTES。
+- start.s：early_boot_progress_map 的第一个参数从 x25 改成 V=P 的 L1。
+- start.s：common_start 写 TCR_EL1_BOOT_V_EQ_P，冷启动和热复位都走这里。
+- proc_reg.h：去掉 TCR_EL1_KVA_ENTRY，换成 TCR_EL1_BOOT_V_EQ_P（不带 EPD0）。
+- pmap.h：BOOTSTRAP_TABLE_SIZE 从 16 页加到 18 页，多一页 L0 根，再留一页给 GOP 的 L2。
+  表不够时 early_boot_progress_map 返回 0，走 brk #0xe01。
+
+结果：
+- 没有 EPD0，也不用在 arm_init 入口切换。pmap_apply_user_tcr 变成空操作但保留，防御性的。
+- Entry.S、BootProgress.c 不用改。_Static_assert 要求的 T0SZ_BOOT（26）不变。
+- PAC 的位置从第一条签名指令起就是最终位置，arm_slide_rebase_and_sign_image 不会留下旧格式的 NULL 签名。
+- 没有条件编译 XNU_EARLY_BOOT_PROGRESS，避免对象之间不一致（第二遍只重编部分对象）。
+- arm_replace_identity_map 只在 KTRR/CTRR 下编译，BCM2837 没有，不受 L0 根影响（arm_vm_init.c:831）。
+- locore.s 里写 TCR_EL1_BOOT 的路径在 __ARM_KERNEL_PROTECT__ 下，BCM2837 没有。
+
+风险：这是本项目新写的路径，没有在任何硬件上跑过，sheng 的路径跑过。Oryon 上 T0SZ=17 开 MMU 需要上机确认。
+
+diff --git a/osfmk/arm/pmap/pmap.h b/osfmk/arm/pmap/pmap.h
+index 9b9da2b..52077c5 100644
+--- a/osfmk/arm/pmap/pmap.h
++++ b/osfmk/arm/pmap/pmap.h
+@@ -118,8 +118,9 @@
+ #elif !defined(APPLE_ARM64_ARCH_FAMILY) && !__ARM_16K_PG__
+ /* Native 4 KiB: two roots plus up to seven L2 pages per 6 GiB mapping.
+  * The physical and virtual bases may each straddle an extra 1 GiB region.
++ * 13T：再加一页 V=P 的 L0 根（T0SZ_USER，见 start.s）和一页 GOP 的 L2（early_boot_progress_map）。
+  */
+-#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 16)
++#define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 18)
+ #else /* defined(ARM_LARGE_MEMORY) */
+ #define BOOTSTRAP_TABLE_SIZE (ARM_PGBYTES * 8)
+ #endif /* defined(ARM_LARGE_MEMORY) */
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index 07e2da5..905f431 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -1197,11 +1197,11 @@
+ 
+ #if T0SZ_USER != T0SZ_BOOT
+ /*
+- * TCR once a CPU runs at kernel addresses: TTBR0 already has its final size, so every pointer
+- * signed from then on (NULL included, it is a TTBR0-range value) carries its PAC at the final
+- * position. TTBR0 walks stay off until it holds a T0SZ_USER-format table.
++ * 13T：TCR 从第一次开 MMU 起就用 T0SZ_USER。TTBR0 的 V=P 表也是 4 级（start.s 的 L0 根），
++ * 所以走表一直开着，早期帧缓冲的恒等映射和 Lfatal 回 V=P 都能用；所有签名指针
++ * （包括 NULL，它在 TTBR0 范围内）从一开始就把 PAC 放在最终位置。
+  */
+-#define TCR_EL1_KVA_ENTRY ((TCR_EL1_BOOT & ~(TCR_TSZ_MASK << TCR_T0SZ_SHIFT)) | (T0SZ_USER << TCR_T0SZ_SHIFT) | TCR_EPD0_DISABLE)
++#define TCR_EL1_BOOT_V_EQ_P ((TCR_EL1_BOOT & ~(TCR_TSZ_MASK << TCR_T0SZ_SHIFT)) | (T0SZ_USER << TCR_T0SZ_SHIFT))
+ #endif /* T0SZ_USER != T0SZ_BOOT */
+ 
+ /*
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index ac6de50..ea5da8b 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -619,9 +619,23 @@ Lkernelcache_base_found:
+ 	 * slide, we need 1xL1 and up to 3xL2 pages (1GB mapped per L1 entry), so
+ 	 * 8 total pages for V=P and KVA.
+ 	 */
++#if T0SZ_USER != T0SZ_BOOT
++	/*
++	 * 13T：TTBR0 是 47 位，V=P 要走 4 级。bootstrap_pagetables 第一页当 L0 根，KVA 的 L1 位置不变
++	 * （common_start 用 x25 + PGBYTES），V=P 的 L1 从空闲池里取。物理地址都在 512 GiB 以内，L0 只有第 0 项。
++	 * Entry.S 的 Lfatal 把 TTBR0 设回 bootstrap_pagetables，这样不用改驱动。
++	 */
++	add		x3, x25, PGBYTES
++	add		x1, x3, PGBYTES
++	mov		x2, x1
++	mov		x5, #(ARM_TTE_BOOT_TABLE)
++	orr		x5, x5, x1
++	str		x5, [x25]
++#else
+ 	mov		x1, x25
+ 	add		x3, x1, PGBYTES
+ 	mov		x2, x3
++#endif
+ 
+ 	/*
+ 	 * Setup the V=P bootstrap mapping
+@@ -649,7 +663,11 @@ Lbootstrap_tables_ready:
+ 	add x9, x9, EXT(early_boot_progress_stack)@pageoff
+ 	add x9, x9, #4096
+ 	mov sp, x9
++#if T0SZ_USER != T0SZ_BOOT
++	mov x0, x1						// V=P 的 L1；这里 x25 是 L0 根
++#else
+ 	mov x0, x25
++#endif
+ 	add x1, x2, #PGBYTES
+ 	add x2, x25, #(BOOTSTRAP_TABLE_BYTES >> 12), lsl #12
+ 	bl EXT(early_boot_progress_map)
+@@ -690,7 +708,11 @@ common_start:
+ #endif
+ 
+ 	// Set the translation control register.
++#if T0SZ_USER != T0SZ_BOOT
++	MOV64	x1, TCR_EL1_BOOT_V_EQ_P
++#else
+ 	MOV64	x1, TCR_EL1_BOOT
++#endif
+ 	MSR_TCR_EL1_X1
+ 
+ 

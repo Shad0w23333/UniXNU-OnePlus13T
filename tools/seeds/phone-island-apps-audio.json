@@ -1,0 +1,54 @@
+{
+  "base": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-apps.dbrdisk",
+  "base_bytes": 2147483648,
+  "base_sha256": "673146926df7abac1673f92f6cbd3e676e08a2711d5e24f36bc3306d5a07b487",
+  "plugin": {
+    "path": "/private/var/ngpu/audio/PaganiAudio.driver",
+    "cdhash": "c88be4108de3c44d3b1fca16e856b33c02961572",
+    "identifier": "org.unixnu.pagani.audio",
+    "page_size": 4096,
+    "factory": "A2DED124-FF38-44E4-B352-70AF95CDBDAD",
+    "factory_function": "PaganiAudio_Create",
+    "executable_sha256": "67047ef48d319e1fc96af7570af037fc353ef5d6c7d1d20ee1ecc2a12e92c12f",
+    "source_sha256": "ba6c4f138670dd920b30029b3021774aa9baa971d3da00bd5e6b6c918dc1826f",
+    "abi_sha256": "27177d00ab42c7db5d27694e77b5e8f56b15fd34f445f6d043faf0d97585cd82"
+  },
+  "files": [
+    "PaganiAudio.driver/Info.plist",
+    "PaganiAudio.driver/PaganiAudio",
+    "PaganiAudio.driver/_CodeSignature/CodeResources"
+  ],
+  "used_kib": 42924,
+  "available_kib": 2045988,
+  "output": {
+    "bytes": 2147483648,
+    "sha256": "aee73c27f14f11727aec26c9cba76fdae3fed8e30f341d646eee9e56c94345ea",
+    "encoded_bytes": 44680544,
+    "encoded_sha256": "fa26fbf2fbd91bcd7d0ff9c4adda963775a04c28246affd79ebe340f680dd25e",
+    "packed": true
+  },
+  "trust": {
+    "output": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-apps-audio-owner-trust.bundle",
+    "base": "/private/tmp/claude-501/-Users-xiaochoumao-unixnu-13t/5559c563-618d-4813-9848-be3768908d8c/scratchpad/diag/out/owner-trust-apps-diag.bundle",
+    "base_sha256": "bc4016a9e9459bf513f17654b38bfa66a6d14351a832fd7036f47326749c6bcc",
+    "already_present": false,
+    "owner_hashes": [
+      "1b4f81e8cc9f97c515170d583f9d41f7d9a654c3",
+      "2b12ec65b01927887c47fbb933c3c2b346f410cc",
+      "7301a8050533febe4882323a19deb5a7129ec64b",
+      "c88be4108de3c44d3b1fca16e856b33c02961572",
+      "d49736008ff8d695d2c571724d6c12a3f8492abd",
+      "e27481d259fab377720adf7b5c89463ac6624634"
+    ],
+    "apple_modules_unchanged": true,
+    "sha256": "7c8ef1b78114558e279a12423f338af59eb579d9c52ca73bd66bb27df1d087f0"
+  },
+  "image_arguments": [
+    "--data-ramdisk",
+    "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-apps-audio.dbrdisk",
+    "--owner-trust-cache",
+    "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-apps-audio-owner-trust.bundle",
+    "--kernel-arg",
+    "pagani-audio=1"
+  ]
+}

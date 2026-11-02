@@ -1,0 +1,103 @@
+--- a/工具/make-phone-seed.py
++++ b/工具/make-phone-seed.py
+@@ -2,7 +2,7 @@
+ """Derive the Data seed of the iPhone-layout images from a GPU Data seed (a DBRDISK1 packed APFS container, add-gpu-plugin-data.py output).
+ 
+   make-phone-seed.py [--gib N] [--disable-jobs LABEL,...] [--wallpaper DIR] [--keyboard FILE] [--keyboard-prefs] [--migrate]
+-                     [--force-install-apps] BASE.dbrdisk OUTPUT.dbrdisk
++                     [--force-install-apps] [--diag-daemon DIR] BASE.dbrdisk OUTPUT.dbrdisk
+ 
+ --gib N            grow the APFS container to N GiB (default 2; at most 2). The 13T keeps Data in a volatile RAM disk: NativeRamBlock serves
+                    a packed seed of at most 2 GiB from RAM, allocating a 4 KiB page only when it is first written (a 4 MiB page table for
+@@ -41,6 +41,17 @@
+                    migration, but every app reached -[MISystemAppMigrator attemptToInstallSystemAppWithBundleID:...] with desired
+                    state 2/6 ("Skipping installation of %@ because it is already uninstalled") and datamigrator removed all 29 staged
+                    apps: one of those passes marked every app hidden (markHiddenAppAsUninstalled:).
++--diag-daemon DIR  the PaganiDiag daemon (UniXNU-Pagani-Drivers drivers/PaganiDiag, scripts/build-paganidiag.py output DIR):
++                   DIR/paganidiag to /private/var/ngpu/bin/paganidiag (0755; its CDHash must be DIR/trust.json's, which the image's
++                   owner trust bundle must carry: scripts/make-diag-trust.py), DIR/paganidiag.conf beside it when present, the
++                   logging preference DIR/com.apple.migration.plist to /private/var/preferences/Logging/Subsystems (Enable/Persist
++                   Info: DataMigration logs every SystemAppMigrator line at info level, which the subsystem would not keep), and
++                   the launchd job DIR/org.unixnu.pagani.diag.plist to /private/var/ngpu/daemons. launchd of 21H461 takes every
++                   /System/Library job from its signed cache, so that job is not what starts the daemon: the kernel
++                   (phone-diag-sysctl.patch) runs it in place of the first exec of /usr/libexec/DumpPanic (job
++                   com.apple.DumpPanic) when the file is there, and the daemon writes its lines through kern.pagani_diag_line.
++                   The launch policy is not changed (com.apple.bluetoothd and com.apple.iomfb_fdr_loader stay disabled); the
++                   seed is refused when its policy disables com.apple.DumpPanic.
+ 
+ BASE is not modified; the volume UUID is unchanged. Writes OUTPUT and OUTPUT with .json (what was done). Runs on macOS (hdiutil, diskutil)."""
+ import argparse
+@@ -83,8 +94,48 @@
+     'com.apple.reminders', 'com.apple.Translate', 'com.apple.shortcuts', 'com.apple.stocks', 'com.apple.tips',
+     'com.apple.VoiceMemos', 'com.apple.weather')
+ KEYBOARD_FIXES = ('com.apple.keyboard:KeyboardDisableHitTesting=true', 'com.apple.keyboard.ContinuousPath:KeyboardContinuousPathEnabled=false')
++# PaganiDiag (--diag-daemon): the daemon, its optional configuration, the logging preference and the (unused on 21H461) launchd job.
++DIAG_FILES = (('paganidiag', 'ngpu/bin/paganidiag', 0o755), ('paganidiag.conf', 'ngpu/bin/paganidiag.conf', 0o644),
++              ('com.apple.migration.plist', 'preferences/Logging/Subsystems/com.apple.migration.plist', 0o644),
++              ('org.unixnu.pagani.diag.plist', 'ngpu/daemons/org.unixnu.pagani.diag.plist', 0o644))
++DIAG_HOST_JOB = 'com.apple.DumpPanic'      # the kernel starts the daemon in place of this job's program
+ 
+ 
++def diag_daemon_files(directory):
++    """The files of a build-paganidiag.py output directory, after checking that the daemon carries the CDHash of its trust.json."""
++    trust = json.loads((directory / 'trust.json').read_text()) if (directory / 'trust.json').is_file() else {}
++    cdhash = trust.get('cdhash', '')
++    detail = subprocess.run(['codesign', '--display', '--verbose=4', str(directory / 'paganidiag')], capture_output=True,
++                            text=True).stderr
++    actual = re.search(r'^CDHash=([0-9a-f]{40})$', detail, re.M)
++    if not re.fullmatch(r'[0-9a-f]{40}', cdhash) or not actual or actual.group(1) != cdhash:
++        sys.exit(f'--diag-daemon: {directory}/paganidiag does not carry the CDHash of {directory}/trust.json')
++    files = [(directory / name, relative, mode) for name, relative, mode in DIAG_FILES if (directory / name).is_file()]
++    if {name for name, _, _ in DIAG_FILES} - {source.name for source, _, _ in files} - {'paganidiag.conf'}:
++        sys.exit(f'--diag-daemon: {directory} lacks a file of build-paganidiag.py')
++    return files, cdhash
++
++
++def stage_diag_daemon(mount, files, cdhash):
++    """Copies the PaganiDiag files into the mounted seed; the seed's launch policy must leave com.apple.DumpPanic enabled."""
++    policy = mount / LAUNCH_POLICY
++    if policy.is_file() and plistlib.loads(policy.read_bytes()).get(DIAG_HOST_JOB) is True:
++        sys.exit(f'--diag-daemon: the seed disables {DIAG_HOST_JOB}, in whose place the kernel starts the daemon')
++    staged = {}
++    for source, relative, mode in files:
++        target = mount / relative
++        for parent in reversed(target.relative_to(mount).parents[:-1]):
++            if not (mount / parent).is_dir():
++                (mount / parent).mkdir()
++                (mount / parent).chmod(0o755)
++        shutil.copyfile(source, target)
++        target.chmod(mode)
++        if target.read_bytes() != source.read_bytes():
++            sys.exit(f'--diag-daemon: /private/var/{relative} reads back different')
++        staged['/private/var/' + relative] = f'{mode:o}'
++    return dict(files=staged, cdhash=cdhash, host_job=DIAG_HOST_JOB)
++
++
+ def run(*args):
+     return subprocess.run(args, check=True, capture_output=True, text=True).stdout
+ 
+@@ -197,6 +248,7 @@
+     parser.add_argument('--keyboard-prefs', action='store_true')
+     parser.add_argument('--migrate', action='store_true')
+     parser.add_argument('--force-install-apps', action='store_true')
++    parser.add_argument('--diag-daemon', type=Path)
+     parser.add_argument('base', type=Path)
+     parser.add_argument('output', type=Path)
+     args = parser.parse_args()
+@@ -209,6 +261,7 @@
+         sys.exit('--wallpaper takes a make-phone-wallpaper-overlay.py directory')
+     if args.keyboard and (args.keyboard.name != 'KBLayouts_iPhone.dat' or not args.keyboard.is_file()):
+         sys.exit('--keyboard takes a KBLayouts_iPhone.dat file')
++    diag = diag_daemon_files(args.diag_daemon) if args.diag_daemon else None
+     target = args.gib * GIB
+     if not 0 < target <= VOLATILE_MAX:
+         sys.exit(f'{args.gib} GiB: a volatile Data RAM disk holds at most 2 GiB (NativeRamBlock); larger needs the persistent store')
+@@ -283,6 +336,8 @@
+                 prefs.chmod(0o600)
+                 report['force_install'] = dict(file='/private/var/' + FORCE_INSTALL, apps=len(FORCE_INSTALL_APPS),
+                                                installation_prefs='/private/var/' + INSTALLATION_PREFS)
++            if diag:
++                report['diag_daemon'] = stage_diag_daemon(mount, *diag)
+             usage = subprocess.run(['df', '-k', str(mount)], capture_output=True, text=True).stdout.splitlines()[-1].split()
+             report['used_kib'], report['available_kib'] = int(usage[2]), int(usage[3])
+         finally:

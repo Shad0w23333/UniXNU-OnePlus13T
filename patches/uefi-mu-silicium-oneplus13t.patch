@@ -1,0 +1,221 @@
+diff --git a/BootShim/BootShim.S b/BootShim/BootShim.S
+index 4d208553..6d92eb35 100644
+--- a/BootShim/BootShim.S
++++ b/BootShim/BootShim.S
+@@ -1,3 +1,23 @@
++/*
++ * Image layout: [ BootShim | FD (FD_SIZE) | embedded payload (EMBEDDED_PAYLOAD_SIZE) ]
++ *
++ * The shim copies the FD to FD_BASE and enters it. x0 (the device tree a
++ * Linux-style boot loader passes) is left untouched. With an embedded payload
++ * the shim also hands over where it was loaded:
++ *
++ *   x1 = physical address of the payload (directly after the loaded FD)
++ *   x2 = payload size in bytes
++ *   x3 = EMBEDDED_PAYLOAD_MAGIC ("UNXPAYLD")
++ *
++ * Without one, x1..x3 are zero, so SEC can tell the cases apart.
++ */
++
++#ifndef EMBEDDED_PAYLOAD_SIZE
++#define EMBEDDED_PAYLOAD_SIZE 0
++#endif
++
++#define EMBEDDED_PAYLOAD_MAGIC 0x444C594150584E55
++
+ _Head:
+   adr   x1, _Payload    /* Set _Entry address */
+   b     _Start          /* Jump to the real code */
+@@ -7,7 +27,7 @@ _StackBase:
+   .quad FD_BASE         /* Text Offset */
+ 
+ _StackSize:
+-  .quad FD_SIZE         /* Image Size */
++  .quad FD_SIZE + (_Payload - _Head) + EMBEDDED_PAYLOAD_SIZE /* Complete shim, FD and payload */
+   .quad 0               /* Flags */
+   .quad 0               /* Reserved */
+   .quad 0               /* Reserved */
+@@ -17,6 +37,17 @@ _StackSize:
+ #endif
+ 
+ _Start:
++#if EMBEDDED_PAYLOAD_SIZE > 0
++  /* The payload stays where the boot loader put it, right after the FD. */
++  ldr   x11, =FD_SIZE
++  add   x11, x1, x11
++  ldr   x12, =EMBEDDED_PAYLOAD_SIZE
++  ldr   x13, =EMBEDDED_PAYLOAD_MAGIC
++#else
++  mov   x11, xzr
++  mov   x12, xzr
++  mov   x13, xzr
++#endif
+   mov   x4, x1
+   ldr   x5, =FD_BASE
+   cmp   x4, x5
+@@ -31,12 +62,38 @@ _CopyLoop:
+   ldr   x5, =FD_BASE
+ 
+ _Entry:
++  /* Publish the copied instructions before executing them. */
++  dsb   sy
++  mrs   x9, ctr_el0
++  ubfx  x9, x9, #16, #4
++  mov   x10, #4
++  lsl   x9, x10, x9
++  sub   x10, x9, #1
++  bic   x8, x5, x10
++  ldr   x7, =FD_SIZE
++  add   x7, x5, x7
++
++_CleanLoop:
++  dc    cvac, x8
++  add   x8, x8, x9
++  cmp   x8, x7
++  b.lo  _CleanLoop
++  dsb   sy
++  ic    iallu
++  dsb   sy
++  isb
++
++  /* Payload handoff for SEC */
++  mov   x1, x11
++  mov   x2, x12
++  mov   x3, x13
+   br    x5
+ 
+ _Dead:
+   b     _Dead
+ 
+ .text
++.ltorg
+ .align 4
+ 
+ _Payload:
+diff --git a/Silicon/Qualcomm/QcomPkg/Library/PlatformBootManagerLib/PlatformBootManager.c b/Silicon/Qualcomm/QcomPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+index 97c29d39..9cfd8bbc 100644
+--- a/Silicon/Qualcomm/QcomPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
++++ b/Silicon/Qualcomm/QcomPkg/Library/PlatformBootManagerLib/PlatformBootManager.c
+@@ -36,7 +36,9 @@ DeviceBootManagerAfterConsole ()
+   }
+ 
+   // Init SD Card
++  DEBUG ((DEBUG_WARN, "BDS: SD init signal begin\n"));
+   gBS->SignalEvent (InitEvent);
++  DEBUG ((DEBUG_WARN, "BDS: SD init signal end\n"));
+   gBS->CloseEvent  (InitEvent);
+ 
+   return NULL;
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
+index 0c05ffa3..72f4a5a5 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
++++ b/Silicon/Silicium/SiliciumPkg/Sec/AArch64/ModuleEntryPoint.S
+@@ -13,6 +13,13 @@
+ .set CTRL_SPAN_BIT, BIT23
+ 
+ ASM_FUNC (_ModuleEntryPoint)
++  // Keep x0..x3 of the previous stage: the DT a Linux-style boot loader hands
++  // over, and the embedded payload BootShim may describe. The slots are in
++  // this section, which is in RAM here.
++  adr   x4, ASM_PFX (gSecEntryArgs)
++  stp   x0, x1, [x4]
++  stp   x2, x3, [x4, #16]
++
+   // Do Platform Specific Initialization
+   bl    ASM_PFX (PlatformAssemblyInitialize)
+ 
+@@ -61,3 +68,9 @@ ASM_PFX (MainEntryPoint):
+ 
+   // Do Infinite Spin
+   b     .
++
++  // Arguments x0..x3 of the previous stage, written once at entry
++  .align 3
++  .global ASM_PFX (gSecEntryArgs)
++ASM_PFX (gSecEntryArgs):
++  .quad 0, 0, 0, 0
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+index 8d586b35..f9779e40 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.c
+@@ -17,6 +17,10 @@
+ #include <Library/HobLib.h>
+ 
+ #include "Sec.h"
++#include <Guid/SiliciumEntryArgs.h>
++
++// Arguments x0..x3 of the previous stage, saved by ModuleEntryPoint.S
++extern UINT64  gSecEntryArgs[4];
+ 
+ #ifndef MDEPKG_NDEBUG
+ STATIC
+@@ -130,6 +134,38 @@ SecMain (VOID)
+     return;
+   }
+ 
++  // Pass on what the previous stage handed over, so DXE drivers can use it:
++  // x0 is a DT address for a Linux-style boot loader, x1..x3 describe a
++  // payload BootShim left after the FD.
++  {
++    UINT64                EntryArg = gSecEntryArgs[0];
++    EMBEDDED_PAYLOAD_HOB  Payload;
++
++    BuildGuidDataHob (&gSiliciumEntryArgHobGuid, &EntryArg, sizeof (EntryArg));
++
++    if (gSecEntryArgs[3] == EMBEDDED_PAYLOAD_MAGIC && gSecEntryArgs[1] != 0 && gSecEntryArgs[2] != 0) {
++      EFI_MEMORY_REGION_DESCRIPTOR  KernelRegion;
++
++      Payload.Base = gSecEntryArgs[1];
++      Payload.Size = gSecEntryArgs[2];
++
++      // The payload stays where the boot loader loaded the image. Only trust it
++      // inside the "Kernel" window: anywhere else SEC's own stack and heaps
++      // may already have overwritten it.
++      ZeroMem (&KernelRegion, sizeof (KernelRegion));
++      LocateMemoryRegionByName ("Kernel", &KernelRegion);
++      if (KernelRegion.Length != 0 &&
++          Payload.Base >= KernelRegion.Address &&
++          Payload.Size <= KernelRegion.Length &&
++          Payload.Base - KernelRegion.Address <= KernelRegion.Length - Payload.Size) {
++        BuildGuidDataHob (&gSiliciumEmbeddedPayloadHobGuid, &Payload, sizeof (Payload));
++        DEBUG ((EFI_D_WARN, "Embedded Payload at 0x%lx, 0x%lx Bytes\n", Payload.Base, Payload.Size));
++      } else {
++        DEBUG ((EFI_D_ERROR, "Embedded Payload at 0x%lx, 0x%lx Bytes is outside the Kernel Region 0x%lx, 0x%lx Bytes!\n", Payload.Base, Payload.Size, KernelRegion.Address, KernelRegion.Length));
++      }
++    }
++  }
++
+   // Run Library Cconstructors
+   ProcessLibraryConstructorList ();
+ 
+diff --git a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+index 79afd196..46b1aa10 100644
+--- a/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
++++ b/Silicon/Silicium/SiliciumPkg/Sec/Sec.inf
+@@ -52,6 +52,8 @@
+ 
+ [Guids]
+   gArmMpCoreInfoGuid
++  gSiliciumEntryArgHobGuid
++  gSiliciumEmbeddedPayloadHobGuid
+ 
+ [Pcd]
+   gEfiMdeModulePkgTokenSpaceGuid.PcdFirmwareVersionString
+diff --git a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
+index 99cd6975..b4499a43 100644
+--- a/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
++++ b/Silicon/Silicium/SiliciumPkg/SiliciumPkg.dec
+@@ -10,6 +10,13 @@
+ [Guids]
+   gSiliciumPkgTokenSpaceGuid          = { 0x055720A6, 0xA739, 0x0047, { 0xBE, 0xC1, 0x67, 0xFC, 0x38, 0x34, 0x54, 0x53 } }
+ 
++  # HOB holding the first argument (x0) the previous stage entered SEC with.
++  # A Linux-style boot loader passes the physical address of a flattened DT.
++  gSiliciumEntryArgHobGuid            = { 0xDAEE82E6, 0x8090, 0x4E72, { 0xBF, 0xB9, 0x78, 0xC1, 0x3C, 0xD4, 0xE3, 0x59 } }
++
++  # HOB describing a payload BootShim left after the FD (Guid/SiliciumEntryArgs.h).
++  gSiliciumEmbeddedPayloadHobGuid     = { 0xC361E71C, 0x3D28, 0x4B61, { 0xBA, 0x08, 0xCA, 0x1C, 0x6C, 0x72, 0x9D, 0xF0 } }
++
+ [Protocols]
+   gKeypadDeviceProtocolGuid           = { 0xA412C1AC, 0x0295, 0x4AE3, { 0xB5, 0x9F, 0x52, 0x23, 0x1F, 0x26, 0x55, 0x4D } }
+ 

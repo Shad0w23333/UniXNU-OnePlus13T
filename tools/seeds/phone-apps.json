@@ -1,0 +1,28 @@
+{
+  "base": "/Users/xiaochoumao/unixnu-13t/build-userspace/tree/build/data-a830-phone-cache-noprime.dbrdisk",
+  "base_bytes": 1073741824,
+  "base_sha256": "fd08441186c47c616b99c8d87d7cca25d42b93bb65610ed9abe2ace09c2a5654",
+  "container_bytes": 2147483648,
+  "disabled_jobs": [
+    "com.apple.CommCenter",
+    "com.apple.PerfPowerServices",
+    "com.apple.bluetoothd",
+    "com.apple.fairplayd.A2",
+    "com.apple.identityservicesd",
+    "com.apple.iomfb_fdr_loader",
+    "com.apple.locationd",
+    "com.apple.watchdogd"
+  ],
+  "wallpaper": "/private/var/ngpu/wallpaper-collections",
+  "keyboard": "/private/var/ngpu/textinputui-layouts",
+  "migration_sentinel": "/private/var/datamigrator/migrate",
+  "used_kib": 41952,
+  "available_kib": 2046960,
+  "output": {
+    "bytes": 2147483648,
+    "sha256": "1736843b9c1261e3307614583c5bab96bcc5a29a12cfb329f555f01d0a38aa95",
+    "encoded_bytes": 43320544,
+    "encoded_sha256": "16322a8a14a02cc2eb0b8e9e8c469f97be8e7cf470c7d9296f2353806ef61aaf",
+    "packed": true
+  }
+}

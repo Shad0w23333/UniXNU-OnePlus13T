@@ -1,0 +1,68 @@
+--- a/工具/make-phone-seed.py
++++ b/工具/make-phone-seed.py
+@@ -3,7 +3,7 @@
+ 
+   make-phone-seed.py [--gib N] [--disable-jobs LABEL,...] [--wallpaper DIR] [--keyboard FILE] [--keyboard-prefs] [--migrate]
+                      [--keep-inline-completions] [--force-install-apps] [--diag-daemon DIR] [--controlcenter DIR]
+-                     [--haptics-overlay DIR] [--keyboard-haptics] [--wifi-firmware DIR]
++                     [--haptics-overlay DIR] [--keyboard-haptics] [--wifi-firmware DIR] [--sensor-pack FILE]
+                      BASE.dbrdisk OUTPUT.dbrdisk
+ 
+ --gib N            grow the APFS container to N GiB (default 2; at most 2). The 13T keeps Data in a volatile RAM disk: NativeRamBlock serves
+@@ -84,6 +84,11 @@
+                    files only, 0644, at most 64 MiB in all. PaganiWifi (pagani-wifi=5 or 6) reads it there after Data is mounted
+                    when the files are not on modem_a; the seed is volatile, nothing is written to the phone. A sha256 of each file
+                    goes to the report. Vendor files: the seed stays local, never committed.
++
++--sensor-pack FILE  the file pack of the ADSP's sensor protection domain (DRV/PaganiSensors/scripts/make-sensor-pack.py, from the phone's
++                   /vendor/etc/sensors and persist registry) to /private/var/ngpu/sensors/pack.bin, 0644, at most 16 MiB. PaganiSensors'
++                   FastRPC file service (pagani-sensors with +4) serves it to the sensor PD after Data is mounted. It holds the phone's
++                   calibration: the seed stays local, never committed.
+ 
+ BASE is not modified; the volume UUID is unchanged. Writes OUTPUT and OUTPUT with .json (what was done). Runs on macOS (hdiutil, diskutil)."""
+ import argparse
+@@ -112,6 +117,8 @@
+ CONTROLCENTER = 'ngpu/controlcenterui'
+ WIFI_FIRMWARE = 'ngpu/firmware/wlan'
+ WIFI_FIRMWARE_MAX = 64 << 20
++SENSOR_PACK = 'ngpu/sensors/pack.bin'
++SENSOR_PACK_MAX = 16 << 20
+ CONTROLCENTER_FILE = 'DefaultModuleSettings~iphone.plist'
+ HAPTICS_OVERLAYS = ('tunings-j120', 'mediaexperience-j120')   # under /private/var/ngpu, each a make-phone-haptics-overlay.py directory
+ HAPTICS_SENTINEL = 'UniXNU-haptics-overlay.txt'
+@@ -341,6 +348,7 @@
+     parser.add_argument('--haptics-overlay', type=Path)
+     parser.add_argument('--keyboard-haptics', action='store_true')
+     parser.add_argument('--wifi-firmware', type=Path)
++    parser.add_argument('--sensor-pack', type=Path)
+     parser.add_argument('base', type=Path)
+     parser.add_argument('output', type=Path)
+     args = parser.parse_args()
+@@ -369,6 +377,11 @@
+             sys.exit('--wifi-firmware: regular files only, at least one')
+         if sum(p.stat().st_size for p in wifi) > WIFI_FIRMWARE_MAX:
+             sys.exit('--wifi-firmware: more than 64 MiB')
++    if args.sensor_pack:
++        if not args.sensor_pack.is_file() or args.sensor_pack.read_bytes()[:8] != b'SSCPACK1':
++            sys.exit('--sensor-pack takes a pack of make-sensor-pack.py')
++        if args.sensor_pack.stat().st_size > SENSOR_PACK_MAX:
++            sys.exit('--sensor-pack: more than 16 MiB')
+     target = args.gib * GIB
+     if not 0 < target <= VOLATILE_MAX:
+         sys.exit(f'{args.gib} GiB: a volatile Data RAM disk holds at most 2 GiB (NativeRamBlock); larger needs the persistent store')
+@@ -481,6 +494,15 @@
+                         sys.exit(f'--wifi-firmware: {relative} reads back different')
+                     files[str(relative)] = dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+                 report['wifi_firmware'] = dict(directory='/private/var/' + WIFI_FIRMWARE, files=files)
++            if args.sensor_pack:
++                destination = mount / SENSOR_PACK
++                destination.parent.mkdir(parents=True, exist_ok=True)
++                shutil.copyfile(args.sensor_pack, destination)
++                destination.chmod(0o644)
++                data = destination.read_bytes()
++                if data != args.sensor_pack.read_bytes():
++                    sys.exit('--sensor-pack reads back different')
++                report['sensor_pack'] = dict(file='/private/var/' + SENSOR_PACK, bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
+             usage = subprocess.run(['df', '-k', str(mount)], capture_output=True, text=True).stdout.splitlines()[-1].split()
+             report['used_kib'], report['available_kib'] = int(usage[2]), int(usage[3])
+         finally:

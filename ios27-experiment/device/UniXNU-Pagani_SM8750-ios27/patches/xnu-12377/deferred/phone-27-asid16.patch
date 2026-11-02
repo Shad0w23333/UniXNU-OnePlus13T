@@ -1,0 +1,59 @@
+phone-27-asid16.patch（从 sheng 移植，推迟，不在 series 里）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 43、58、101 块。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+
+类别：板无关，性能优化。
+作用：用 16 位硬件 ASID。8 位时进程超过 255 个就要共用 ASID，切换时清 TLB。27 进程数多，sheng 打开了。
+推迟原因：缺一个数据。Oryon 的 ID_AA64MMFR0_EL1.ASIDBits（bit 7:4）没有实测值，日志和文档里都没找到，
+pmap_bootstrap 里有检查，不是 16 位就直接 panic，首次上机不想为优化多一个失败点。
+恢复条件：DarwinBoot 已经打印 ID_AA64MMFR0_EL1，上机后读一次 UEFI 日志，bit 7:4 等于 2 就把本补丁加进 series 末尾。
+
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index 7a3a606..1388487 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -2360,6 +2360,10 @@ pmap_bootstrap(
+ 
+ 	pmap_max_asids = pmap_compute_max_asids();
+ #if HAS_16BIT_ASID
++	/* UniXNU: TCR_EL1.AS is set (TCR_EL1_ASID); on a core with 8-bit ASIDs it is RES0 and the ASIDs above 255 would alias. */
++	if (((__builtin_arm_rsr64("ID_AA64MMFR0_EL1") >> 4) & 0xf) != 2) {
++		panic("pmap: HAS_16BIT_ASID, but ID_AA64MMFR0_EL1 0x%llx has no 16-bit ASIDs", __builtin_arm_rsr64("ID_AA64MMFR0_EL1"));
++	}
+ 	asid_chunk_size = MAX_HW_ASIDS;
+ #else
+ 	pmap_asid_plru = (pmap_max_asids > MAX_HW_ASIDS);
+diff --git a/osfmk/arm64/cpu.c b/osfmk/arm64/cpu.c
+index eb62255..c9da0f6 100644
+--- a/osfmk/arm64/cpu.c
++++ b/osfmk/arm64/cpu.c
+@@ -862,8 +862,10 @@ cpu_data_init(cpu_data_t *cpu_data_ptr)
+ 	pmap_cpu_data_ptr->pv_free_spill_marker = NULL;
+ #if !CONFIG_SPTM
+ 	pmap_cpu_data_ptr->cpu_nested_pmap = (struct pmap *) NULL;
++#if !HAS_16BIT_ASID
+ 	bzero(&(pmap_cpu_data_ptr->cpu_sw_asids[0]), sizeof(pmap_cpu_data_ptr->cpu_sw_asids));
+ #endif
++#endif
+ #endif /* !XNU_MONITOR */
+ 	cpu_data_ptr->halt_status = CPU_NOT_HALTED;
+ #if __ARM_KERNEL_PROTECT__
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index b746edc..fd1f6b7 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -10,6 +10,13 @@
+ #define HAS_CLUSTER 1
+ #define NO_CPU_OVRD 1
+ 
++/*
++ * UniXNU: 16-bit hardware ASIDs (TCR_EL1.AS), one per address space. With 8 bits the pmap shares each hardware ASID among
++ * several address spaces once more than 255 exist and flushes it from the switching CPU's TLB at every switch between them;
++ * iPadOS runs several hundred processes. Every ARMv8.2+ core (sheng's A510/A715/X3) has 16-bit ASIDs; pmap_bootstrap() checks.
++ */
++#define HAS_16BIT_ASID 1
++
+ #define BCM2837
+ #define ARM_ARCH_TIMER
+ 

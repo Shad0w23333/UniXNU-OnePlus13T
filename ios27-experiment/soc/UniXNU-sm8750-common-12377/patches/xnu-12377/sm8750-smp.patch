@@ -1,0 +1,98 @@
+sm8750-smp.patch（xnu-12377 版）
+
+来源：本项目 UniXNU-sm8750-common/patches/xnu/sm8750-smp.patch（10063 版 69 行），按 12377 手工重做。
+
+保留的改动：
+- BCM2837.h：HAS_CLUSTER、NO_CPU_OVRD。
+- machine_routines.c：MPIDR_CPU_ID 取 Aff1，MPIDR_CLUSTER_ID 取 Aff2，ml_get_cpu_number 的掩码加上 Aff2。
+- start.s：reset_vector 的 CPU 匹配掩码放宽到 0xFFFFFF。SM8750 的 reg 是 0x0..0x500、0x10000、0x10100，
+  核号在 Aff1，簇号在 Aff2（UniXNU-sm8750-common/dts）。
+
+去掉的两块（12377 已不需要）：
+- board_config.h 的 MAX_CPUS 8、MAX_CPU_CLUSTERS 2：上游 arm64e 系列已经写好，再打就是重复。
+- sched_clutch.c 的 .multiple_psets_enabled = FALSE：12377 的非 AMP ARM 固定只有一个 pset
+  （processor.c processor_bootstrap、machine_routines.c ml_bootstrap_processors 里 pset = sched_boot_pset），
+  这个字段只在 x86_64 的 pset_create_smp 里读，arm64 上改了没有效果。13T 不定义 __ARM_AMP__，
+  调度器仍是 Clutch 单 pset，与 17.7.11 一致。
+
+新增的改动（10063 没有这个问题）：
+- machine_routines_asm.s：12377 的 arm64_prepare_for_sleep 给 NO_CPU_OVRD 加了 #else 分支，访问
+  ACNTHV_CTL_EL2（S3_1_C15_C7_4），WFI 之后又写 S3_5_C15_C1_1。这两个都是苹果实现定义寄存器。
+  sheng 不定义 HAS_CLUSTER 和 NO_CPU_OVRD，所以走不到这里；13T 两个都定义，必须挡住，
+  否则 CPU 下线路径上会触发未定义指令。挡法：这两处只在 APPLE_ARM64_ARCH_FAMILY 下生效。
+
+与 sheng 的区别：sm8550 的 native-smp-secondary.patch 只把掩码放宽到 0xFFFF 且不定义 HAS_CLUSTER，
+靠 ADT 的 cluster-type 分簇。13T 有 Aff2，不能照搬。
+
+diff --git a/osfmk/arm64/machine_routines.c b/osfmk/arm64/machine_routines.c
+index 07143d5..e384dee 100644
+--- a/osfmk/arm64/machine_routines.c
++++ b/osfmk/arm64/machine_routines.c
+@@ -104,8 +104,8 @@ SECURITY_READ_ONLY_LATE(uint64_t) cluster_pio_ro_ctl_mask_glb = 0;
+ #include <kern/kpc.h>
+ #endif /* CONFIG_CPU_COUNTERS */
+ 
+-#define MPIDR_CPU_ID(mpidr_el1_val)             (((mpidr_el1_val) & MPIDR_AFF0_MASK) >> MPIDR_AFF0_SHIFT)
+-#define MPIDR_CLUSTER_ID(mpidr_el1_val)         (((mpidr_el1_val) & MPIDR_AFF1_MASK) >> MPIDR_AFF1_SHIFT)
++#define MPIDR_CPU_ID(mpidr_el1_val)             (((mpidr_el1_val) & MPIDR_AFF1_MASK) >> MPIDR_AFF1_SHIFT)
++#define MPIDR_CLUSTER_ID(mpidr_el1_val)         (((mpidr_el1_val) & MPIDR_AFF2_MASK) >> MPIDR_AFF2_SHIFT)
+ 
+ #if HAS_CLUSTER
+ static uint8_t cluster_initialized = 0;
+@@ -1414,7 +1414,7 @@ ml_get_boot_cluster_type(void)
+ int
+ ml_get_cpu_number(uint32_t phys_id)
+ {
+-	phys_id &= MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
++	phys_id &= MPIDR_AFF2_MASK | MPIDR_AFF1_MASK | MPIDR_AFF0_MASK;
+ 
+ 	for (unsigned i = 0; i < topology_info.num_cpus; i++) {
+ 		if (topology_info.cpus[i].phys_id == phys_id) {
+diff --git a/osfmk/arm64/machine_routines_asm.s b/osfmk/arm64/machine_routines_asm.s
+index 671dc50..2c96368 100644
+--- a/osfmk/arm64/machine_routines_asm.s
++++ b/osfmk/arm64/machine_routines_asm.s
+@@ -1594,7 +1594,7 @@ vm_sleep_individual_cpu:
+ 	orr		x9, x9, x10
+ 	msr		CPU_OVRD, x9
+ 	isb
+-#else
++#elif defined(APPLE_ARM64_ARCH_FAMILY) /* SM8750：ACNTHV_CTL_EL2 是苹果实现定义寄存器，Oryon 在 EL1 访问不了 */
+ 	// Mask timer IRQs before entering WFI
+ 	mrs     x9, ACNTHV_CTL_EL2
+ 	mov     x10, #(~ACNTHV_CTL_EL2_EN_MASK)
+@@ -1664,7 +1664,7 @@ Lwfi_inst:
+ 	dsb		sy
+ 	isb		sy
+ 	wfi
+-#if NO_CPU_OVRD
++#if NO_CPU_OVRD && defined(APPLE_ARM64_ARCH_FAMILY) /* SM8750：S3_5_C15_C1_1 是苹果的 IPI 状态寄存器 */
+ 	// Clear any spurious IPIs received during CPU shutdown
+ 	mov     x9, #0x1
+ 	msr     S3_5_C15_C1_1, x9
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index d66c616..a0a7ca0 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -146,7 +146,7 @@ LEXT(reset_vector)
+ 	add		x19, x19, EXT(ResetHandlerData)@pageoff
+ 	mrs		x15, MPIDR_EL1						// Load MPIDR to get CPU number
+ #if HAS_CLUSTER
+-	and		x0, x15, #0xFFFF					// CPU number in Affinity0, cluster ID in Affinity1
++	and		x0, x15, #0xFFFFFF				// SM8750: core in Aff1, cluster in Aff2
+ #else
+ 	and		x0, x15, #0xFF						// CPU number is in MPIDR Affinity Level 0
+ #endif
+diff --git a/pexpert/pexpert/arm64/BCM2837.h b/pexpert/pexpert/arm64/BCM2837.h
+index 5a5574e..b746edc 100644
+--- a/pexpert/pexpert/arm64/BCM2837.h
++++ b/pexpert/pexpert/arm64/BCM2837.h
+@@ -7,6 +7,8 @@
+ 
+ #define NO_MONITOR 1
+ #define NO_ECORE 1
++#define HAS_CLUSTER 1
++#define NO_CPU_OVRD 1
+ 
+ #define BCM2837
+ #define ARM_ARCH_TIMER

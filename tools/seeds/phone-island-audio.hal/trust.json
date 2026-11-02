@@ -1,0 +1,10 @@
+{
+  "cdhash": "57a283d0817386b0cfc9ea824fbc8411d57aaeca",
+  "identifier": "org.unixnu.pagani.audio",
+  "page_size": 4096,
+  "factory": "A2DED124-FF38-44E4-B352-70AF95CDBDAD",
+  "factory_function": "PaganiAudio_Create",
+  "executable_sha256": "73925ccd8405b618c92538a3abe740d299b781461f397a9e3961181bb678f7c9",
+  "source_sha256": "1a8ff8e2f80fb48b7efd5462715f2170bd5d983a26af5c4704040fb56ea31073",
+  "abi_sha256": "3d42e833912ab14c01a02101dd65bbaf04193736edcbaf9faf3144b95645a864"
+}

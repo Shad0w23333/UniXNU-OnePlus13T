@@ -1,0 +1,47 @@
+--- a/build-userspace/a830-inputs/linux-like-reset/tools/mutate.py
++++ b/build-userspace/a830-inputs/linux-like-reset/tools/mutate.py
+@@ -4,6 +4,7 @@
+ Test/gunyah-wdog.c for GunyahWdog.c; -O1, ASan/UBSan) and expects the test to fail (or time out).
+ M1-M16: the first version (2026-10-31 07:00); M17-M35 and W1-W5: the review fixes F1 (implied clear and its gate), S3 (the
+ watchdog's hold and release), S4 (interrupts after the park) and S5 (the refused masks).
++P1-P9: ramoops_log_power_off (pagani-halt): SYSTEM_OFF once, the watchdog held through it, no bite, no OEM reboot.
+ usage: mutate.py <BootProgress dir> <scratch dir>"""
+ import shutil, subprocess, sys
+ from pathlib import Path
+@@ -12,7 +13,7 @@
+ SDI_LINE = ('    if (steps & RAMOOPS_RESET_SEQ_SDI) (void)reset_seq_call("reset seq: SDI off", RESET_SEQ_FN_SDI_OFF, 2, 1, 0, 0, '
+             'NULL);\n')
+ PROBE_LINE = '    if ((mask & RAMOOPS_RESET_SEQ_PROBE) && !(mask & RAMOOPS_RESET_SEQ_DLOAD) && !implied)'
+-RELEASE = '    ramoops_platform_wdog_release(reason);\n'
++RELEASE = '    if (!__atomic_load_n(&reset_power_off, __ATOMIC_ACQUIRE)) ramoops_platform_wdog_release(reason);\n'
+ MUTATIONS = {
+     'M1 steps for every resetter': ('    if (!first) {\n        const uint64_t start = log_counter(), limit',
+                                     '    if (0) {\n        const uint64_t start = log_counter(), limit'),
+@@ -50,13 +51,25 @@
+     'M22 SYSTEM_RESET2 ignores the skip': ('    return (!reset_cold || reset_cold_skipped) && ', '    return !reset_cold && '),
+     'M23 the gate skips nothing': ('            steps &= ~(uint32_t)RAMOOPS_RESET_SEQ_WARM;\n', ''),
+     # S3: the watchdog's hold before the steps and its release right before PSCI.
+-    'M24 no hold': ('    if (!bite && reset_seq_mask) held = ramoops_platform_wdog_hold(reason);\n', ''),
++    'M24 no hold': ('    if (!bite && (reset_seq_mask || power_off)) held = ramoops_platform_wdog_hold(reason);\n', ''),
+     'M25 no release': (RELEASE, ''),
+     'M26 every resetter releases': (
+         '&& log_counter() - start < limit) relax();\n        return;',
+         '&& log_counter() - start < limit) relax();\n        ramoops_platform_wdog_release(reason);\n        return;'),
+     'M27 released before the steps': (RELEASE, ''),           # moved, see below
+-    'M28 hold on the bite path too': ('    if (!bite && reset_seq_mask) held', '    if (reset_seq_mask) held'),
++    'M28 hold on the bite path too': ('    if (!bite && (reset_seq_mask || power_off)) held', '    if (reset_seq_mask) held'),
++    # ramoops_log_power_off.
++    'P1 the bite on a power off': ('    if (reset_wdog && !power_off) bite', '    if (reset_wdog) bite'),
++    'P2 no hold on a power off': ('    if (!bite && (reset_seq_mask || power_off)) held', '    if (!bite && reset_seq_mask) held'),
++    'P3 the OEM reboot on a power off': ('power_off ? reset_seq_mask & ~(uint32_t)RAMOOPS_RESET_SEQ_OEM : reset_seq_mask', 'reset_seq_mask'),
++    'P4 released before SYSTEM_OFF': (RELEASE, '    ramoops_platform_wdog_release(reason);\n'),
++    'P5 no SYSTEM_OFF': ('    if (first && power_off) {\n', '    if (0) {\n'),
++    'P6 every resetter powers off': ('    if (first && power_off) {\n', '    if (power_off) {\n'),
++    'P7 no release when SYSTEM_OFF comes back': ('        log_reset_text();\n        ramoops_platform_wdog_release(reason);\n    }\n',
++                                                 '        log_reset_text();\n    }\n'),
++    'P8 SYSTEM_RESET for SYSTEM_OFF': ('ramoops_platform_psci(psci_hvc, PSCI_SYSTEM_OFF, 0, 0, 0)',
++                                       'ramoops_platform_psci(psci_hvc, PSCI_SYSTEM_RESET, 0, 0, 0)'),
++    'P9 no flag': ('    __atomic_store_n(&reset_power_off, 1, __ATOMIC_RELEASE);\n', ''),
+     # S4: interrupts after the CPU park.
+     'M29 interrupts back after the park': ('    if (!(steps & RAMOOPS_RESET_SEQ_CPUS)) irq_restore_flags(flags);',
+                                            '    irq_restore_flags(flags);'),

@@ -1,0 +1,23 @@
+zzzzzzz-early-framebuffer-page-tables.patch（xnu-12377 版）
+
+来源：本项目 UniXNU-Pagani_SM8750-gpu/patches/xnu/zzzzzzz-early-framebuffer-page-tables.patch（10063）。
+处理：手工移植。上下文里 cpu_l1_tte 那行变成 L1_TABLE_T1_INDEX，改动本身不变。
+作用：early_boot_progress_vm_ready 用 ml_io_map_wcomb 映射 GOP 一次，initialize_screen 再映射一次，
+L3 页表预留要够两份帧缓冲，否则早期 pmap_expand 会要页。
+注意：arm_vm_init.o 不在第二遍重编表里。
+
+diff --git a/osfmk/arm64/arm_vm_init.c b/osfmk/arm64/arm_vm_init.c
+index 01ab93b..6fa7d80 100644
+--- a/osfmk/arm64/arm_vm_init.c
++++ b/osfmk/arm64/arm_vm_init.c
+@@ -2295,6 +2295,10 @@ arm_vm_init(uint64_t memory_size, boot_args * args)
+ 	va_l1 = dynamic_memory_begin;
+ 	va_l1_end = va_l1 + ((2 + (mem_segments * 10)) << 20);
+ 	va_l1_end += round_page(args->Video.v_height * args->Video.v_rowBytes);
++#if defined(XNU_EARLY_BOOT_PROGRESS) && XNU_EARLY_BOOT_PROGRESS
++	/* The early observer maps GOP once before initialize_screen maps it again. */
++	va_l1_end += round_page(args->Video.v_height * args->Video.v_rowBytes);
++#endif
+ 	va_l1_end = (va_l1_end + 0x00000000007FFFFFULL) & 0xFFFFFFFFFF800000ULL;
+ 
+ 	cpu_l1_tte = cpu_tte + L1_TABLE_T1_INDEX(va_l1, TCR_EL1_BOOT);

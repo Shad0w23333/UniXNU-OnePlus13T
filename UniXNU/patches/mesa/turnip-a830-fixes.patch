@@ -1,0 +1,106 @@
+Adreno 830 fixes to Turnip and ir3 that are not in upstream Mesa (after turnip-a830-upstream.patch, before the darwin backend):
+  - tu_EndCommandBuffer ends with DSB SY in the darwin build: the backend's command streams are write-combined and metal2vulkan submits
+    them from another thread than the one that recorded them (data-a-live pandora_dsb.py: a two-cluster gen8 phone hung on a
+    CP_INDIRECT_BUFFER the GPU had read only part of). darwin_submit_chunk() fences the submitting thread (turnip-darwin-kmd.patch).
+  - ir3_context_error() calls abort() instead of UNREACHABLE(""), which NDEBUG turns into __builtin_unreachable() (annibale on the
+    REDMI K90's A830: the compiling thread never returned and SpringBoard's main thread hung for good).
+  - A8XX emits CP_CCHE_INVALIDATE whenever a flush asks for it, also next to a UCHE invalidate (A7XX keeps skipping it there), and the
+    framebuffer-feedback flushes (subpass feedback_invalidate, dynamic input attachments) ask for it: on the A830 framebuffer fetch read
+    another GMEM bin's pixels after a CCU clean and a UCHE invalidate until CCHE was invalidated too (hackios-xnu-userland 94e4c97).
+
+diff --git a/src/freedreno/ir3/ir3_context.c b/src/freedreno/ir3/ir3_context.c
+index 1d6acf2..e497bc3 100644
+--- a/src/freedreno/ir3/ir3_context.c
++++ b/src/freedreno/ir3/ir3_context.c
+@@ -348,7 +348,15 @@ ir3_context_error(struct ir3_context *ctx, const char *format, ...)
+    nir_log_shader_annotated(ctx->s, errors);
+    ralloc_free(errors);
+    ctx->error = true;
+-   UNREACHABLE("");
++   /* Not UNREACHABLE(""): with NDEBUG that is __builtin_unreachable(), and a
++    * release build ran on past this NORETURN function into whatever code
++    * followed. On an Adreno 830 under XNU the compiling thread then never
++    * returned and the render server's main thread, waiting for the
++    * pipeline, hung for good. Stop the process once the shader has been
++    * logged above (MESA_LOG=syslog puts it in the system log), so that it
++    * is restarted instead.
++    */
++   abort();
+ }
+ 
+ static struct ir3_instruction *
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 049c565..f66745e 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -399,9 +399,14 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
+        * via UCHE. This isn't necessary on A6XX, all writes should be visible implictly.
+        */
+       tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CCU_CLEAN_BLIT_CACHE);
++   /* Invalidating UCHE seems to also invalidate CCHE on A7XX. Not on the
++    * A830 (gen8): after a CCU clean and a UCHE invalidate, framebuffer fetch
++    * still read another GMEM bin's pixels until CCHE was invalidated as well
++    * (annibale, hackios-xnu-userland 94e4c97), so A8XX always gets the CCHE
++    * invalidate a flush asks for.
++    */
+    if (CHIP >= A7XX && (flushes & TU_CMD_FLAG_CCHE_INVALIDATE) &&
+-       /* Invalidating UCHE seems to also invalidate CCHE */
+-       !(flushes & TU_CMD_FLAG_CACHE_INVALIDATE)) {
++       (CHIP >= A8XX || !(flushes & TU_CMD_FLAG_CACHE_INVALIDATE))) {
+       /* CP_CCHE_INVALIDATE is just a plain register write underneath, so
+        * it needs WFI before it, in order to invalidate at the right point.
+        */
+@@ -5356,6 +5361,19 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
+    tu_cs_end(&cmd_buffer->draw_cs);
+    tu_cs_end(&cmd_buffer->draw_epilogue_cs);
+ 
++#if defined(TU_HAS_DARWIN) && defined(__aarch64__)
++   /* The darwin backend's command streams are write-combined (Normal
++    * non-cacheable) and metal2vulkan submits them from another thread than
++    * the one recording them; the kernel's barriers before it rings the GPU
++    * run on the submitting core. Complete this thread's stores before the
++    * command buffer leaves it: on a two-cluster gen8 phone the GPU read a
++    * CP_INDIRECT_BUFFER with its low address word and size but not its high
++    * word, and hung (data-a-live pandora_dsb.py). darwin_submit_chunk() does
++    * the same on the submitting thread.
++    */
++   __asm__ volatile("dsb sy" ::: "memory");
++#endif
++
+    return vk_command_buffer_end(&cmd_buffer->vk);
+ }
+ TU_GENX(tu_EndCommandBuffer);
+@@ -7011,10 +7029,14 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
+       cmd->state.cache.pending_flush_bits;
+    cmd->state.renderpass_cache.flush_bits = 0;
+ 
++   /* Input attachments read through UCHE and, on A8XX, CCHE: in GMEM the
++    * draw_cs runs once per bin, so a cache that kept the previous bin's GMEM
++    * lines returns them at the same offsets in this bin.
++    */
+    if (pass->subpasses[0].feedback_invalidate) {
+       cmd->state.renderpass_cache.flush_bits |=
+          TU_CMD_FLAG_CACHE_INVALIDATE | TU_CMD_FLAG_BLIT_CACHE_CLEAN |
+-         TU_CMD_FLAG_WAIT_FOR_IDLE;
++         TU_CMD_FLAG_CCHE_INVALIDATE | TU_CMD_FLAG_WAIT_FOR_IDLE;
+    }
+ 
+    tu_lrz_begin_renderpass<CHIP>(cmd);
+@@ -7402,7 +7424,7 @@ tu_CmdNextSubpass2(VkCommandBuffer commandBuffer,
+    if (cmd->state.subpass->feedback_invalidate) {
+       cmd->state.renderpass_cache.flush_bits |=
+          TU_CMD_FLAG_CACHE_INVALIDATE | TU_CMD_FLAG_BLIT_CACHE_CLEAN |
+-         TU_CMD_FLAG_WAIT_FOR_IDLE;
++         TU_CMD_FLAG_CCHE_INVALIDATE | TU_CMD_FLAG_WAIT_FOR_IDLE;
+    }
+ 
+    tu_fill_render_pass_state(&cmd->state.vk_rp,
+@@ -8303,7 +8325,7 @@ tu_flush_dynamic_input_attachments(struct tu_cmd_buffer *cmd)
+    if (!cmd->state.blit_cache_cleaned) {
+       cmd->state.renderpass_cache.flush_bits |=
+          TU_CMD_FLAG_CACHE_INVALIDATE | TU_CMD_FLAG_BLIT_CACHE_CLEAN |
+-         TU_CMD_FLAG_WAIT_FOR_IDLE;
++         TU_CMD_FLAG_CCHE_INVALIDATE | TU_CMD_FLAG_WAIT_FOR_IDLE;
+    }
+ }
+ 

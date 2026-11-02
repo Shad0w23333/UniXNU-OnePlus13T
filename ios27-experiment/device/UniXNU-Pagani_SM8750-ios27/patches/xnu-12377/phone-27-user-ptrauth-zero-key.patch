@@ -1,0 +1,54 @@
+phone-27-user-ptrauth-zero-key.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 80、95、96、97 块，去掉 sheng-sign 打印。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，27 必需（HAS_NATIVE_PAC）。
+作用：共享区 slide（v3、v5 页、v5 分片）和 dyld pager 的 signPointer 原来用 jop_key != 0 当作“要签名”的条件。
+原生 PAC 下用户 JOP 键值可以是 0，这个条件会让 arm64e 指针不签名。条件改为只看 arm_user_jop_disabled()。
+
+diff --git a/osfmk/vm/vm_dyld_pager.c b/osfmk/vm/vm_dyld_pager.c
+index 6b26d94..ebcedc9 100644
+--- a/osfmk/vm/vm_dyld_pager.c
++++ b/osfmk/vm/vm_dyld_pager.c
+@@ -586,7 +586,7 @@ signPointer(
+ 	switch (key) {
+ 	case ptrauth_key_asia:
+ 	case ptrauth_key_asda:
+-		if (pager->dyld_a_key == 0 || arm_user_jop_disabled()) {
++		if (arm_user_jop_disabled()) {
+ 			*signedAddr = unsignedAddr;
+ 		} else {
+ 			*signedAddr = (uintptr_t)pmap_sign_user_ptr((void *)unsignedAddr, key, extendedDiscriminator, pager->dyld_a_key);
+diff --git a/osfmk/vm/vm_shared_region.c b/osfmk/vm/vm_shared_region.c
+index 451f335..09532fc 100644
+--- a/osfmk/vm/vm_shared_region.c
++++ b/osfmk/vm/vm_shared_region.c
+@@ -3335,7 +3335,7 @@ vm_shared_region_slide_page_v3(
+ 				discriminator = __builtin_ptrauth_blend_discriminator((void*)(((uintptr_t)uservaddr) + pageOffset), discriminator);
+ 			}
+ 
+-			if (jop_key != 0 && si->si_ptrauth && !arm_user_jop_disabled()) {
++			if (si->si_ptrauth && !arm_user_jop_disabled()) {
+ #if CONFIG_SPTM
+ 				pmap_batch_sign_user_ptr(rebaseLocation, (void *)value, key, discriminator, jop_key);
+ #else /* CONFIG_SPTM */
+@@ -3554,7 +3554,7 @@ vm_shared_region_slide_page_v5(
+ 				discriminator = __builtin_ptrauth_blend_discriminator((void*)(((uintptr_t)uservaddr) + pageOffset), discriminator);
+ 			}
+ 
+-			if (jop_key != 0 && si->si_ptrauth && !arm_user_jop_disabled()) {
++			if (si->si_ptrauth && !arm_user_jop_disabled()) {
+ #if CONFIG_SPTM
+ 				pmap_batch_sign_user_ptr(rebaseLocation, (void *)value, key, discriminator, jop_key);
+ #else /* CONFIG_SPTM */
+@@ -3644,7 +3644,7 @@ vm_shared_region_slide_part_v5(
+ 					uintptr_t pageOffset = rebaseLocation - page_content;
+ 					discriminator = __builtin_ptrauth_blend_discriminator((void*)(((uintptr_t)uservaddr) + pageOffset), discriminator);
+ 				}
+-				if (jop_key != 0 && si->si_ptrauth && !arm_user_jop_disabled()) {
++				if (si->si_ptrauth && !arm_user_jop_disabled()) {
+ #if CONFIG_SPTM
+ 					pmap_batch_sign_user_ptr(rebaseLocation, (void *)value, key, discriminator, jop_key);
+ #else /* CONFIG_SPTM */

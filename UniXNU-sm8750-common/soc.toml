@@ -1,0 +1,10 @@
+schema_version = 2
+[soc]
+name = "sm8750"
+description = "Qualcomm SM8750 resources observed on OnePlus 13T PKX110"
+source = "https://github.com/IssacL04/UniXNU-Pagani_SM8750"
+revision = "9a6b057527429159a531f37c3af5b7235806caf1"
+hardware_dtb_sha256 = "d00767f2068d0df73fc2a077de750bba66a5420c77414db1441ff09f6f3ec223"
+
+[components]
+include = ["Sm8750Platform"]

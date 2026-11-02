@@ -1,0 +1,23 @@
+--- a/UniXNU-Pagani-Drivers/drivers/Stage7Probe/Stage7Probe.cpp	2026-10-31 07:45:50
++++ b/UniXNU-Pagani-Drivers/drivers/Stage7Probe/Stage7Probe.cpp	2026-10-31 09:34:00
+@@ -45,6 +45,10 @@
+ // The vibrator (drivers/PaganiHaptics, appended to the Adreno830 archive) replaces this default the same way. It reads its own boot
+ // argument pagani-haptics (absent: off; 2: dry run) and returns at once; its own kernel thread does the rest.
+ extern "C" __attribute__((weak)) void pagani_haptics_start(void) {}
++// The sensors (drivers/PaganiSensors, appended to the Adreno830 archive) replace this default the same way. It reads its own boot argument
++// pagani-sensors (absent or 0: off, nothing registered) and returns at once; it opens PaganiAdsp IPC router ports, so it comes after
++// pagani_adsp_start, and its own kernel thread does the rest.
++extern "C" __attribute__((weak)) void pagani_sensors_start(void) {}
+ static IOService *pendingDisplay,*gpuPresenter;
+ static bool displayInitialized,ephemeralState,frameStatus;
+ static uint64_t frames,clients,aksCalls,aksOpens;
+@@ -295,6 +299,9 @@
+     // The vibrator after the audio service (its API is for the audio side) and the battery (its low-battery rule reads the battery's
+     // status); asynchronous, never blocks the display.
+     pagani_haptics_start();
++    // The sensors last: the iOS sensor services (registered before launchd, MobileGestalt asks early) and, with pagani-adsp=1, the
++    // sensor hub's client on PaganiAdsp's IPC router (its registry exists once pagani_adsp_start ran); asynchronous, never blocks.
++    pagani_sensors_start();
+     OSSafeReleaseNULL(ranges);OSSafeReleaseNULL(memory);OSSafeReleaseNULL(typeData);
+     if(!started) {
+         if(attached)display->detach(nub);

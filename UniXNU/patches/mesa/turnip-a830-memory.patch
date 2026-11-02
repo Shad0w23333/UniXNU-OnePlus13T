@@ -1,0 +1,114 @@
+diff --git a/src/freedreno/vulkan/tu_queue.cc b/src/freedreno/vulkan/tu_queue.cc
+--- a/src/freedreno/vulkan/tu_queue.cc
++++ b/src/freedreno/vulkan/tu_queue.cc
+@@ -193,12 +193,27 @@
+       dev->vis_stream_count = MAX2(dev->vis_stream_count,
+                                    min_vis_stream_count);
+       dev->vis_stream_size = MAX2(dev->vis_stream_size, max_size);
+-      if (dev->vis_stream_bo)
++      /* The old BO goes (each command buffer that used it keeps its own
++       * reference until it is reset), and a failed allocation must not leave
++       * the device pointing at the freed one: its iova would be patched into
++       * this submission's visibility streams.
++       */
++      if (dev->vis_stream_bo) {
+          tu_bo_finish(dev, dev->vis_stream_bo);
++         dev->vis_stream_bo = NULL;
++      }
+       result = tu_bo_init_new(dev, &dev->vk.base, &dev->vis_stream_bo,
+                               dev->vis_stream_size * dev->vis_stream_count, 
+                               TU_BO_ALLOC_INTERNAL_RESOURCE,
+                               "visibility stream");
++      if (result != VK_SUCCESS) {
++         dev->vis_stream_bo = NULL;
++         mesa_loge("visibility stream of %u x %u bytes: allocation failed (%d)",
++                   dev->vis_stream_count, dev->vis_stream_size, result);
++      } else {
++         mesa_logw("visibility stream now %u x %u bytes",
++                   dev->vis_stream_count, dev->vis_stream_size);
++      }
+    }
+ 
+    bo = dev->vis_stream_bo;
+@@ -441,8 +456,13 @@
+ 
+    VkResult result =
+       tu_insert_dynamic_cmdbufs(device, &cmd_buffers, &cmdbuf_count);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      /* Every failure below the lock gives it back: a failed submission that
++       * kept it stopped every later one of the process for good.
++       */
++      pthread_mutex_unlock(&device->submit_mutex);
+       return result;
++   }
+ 
+    bool has_trace_points = false;
+    static_assert(offsetof(struct tu_cmd_buffer, vk) == 0,
+@@ -455,19 +475,26 @@
+    struct tu_u_trace_submission_data *u_trace_submission_data = NULL;
+ 
+    void *submit = tu_submit_create(device);
+-   if (!submit)
++   if (!submit) {
++      result = VK_ERROR_OUT_OF_HOST_MEMORY;
++      pthread_mutex_unlock(&device->submit_mutex);
+       goto fail_create_submit;
++   }
+ 
+    result = resolve_vis_stream_patchpoints(queue, submit, &dump_cmds,
+                                            cmd_buffers, cmdbuf_count);
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      pthread_mutex_unlock(&device->submit_mutex);
+       goto out;
++   }
+ 
+    result = resolve_cb_control_patchpoints(queue, submit, &dump_cmds,
+                                            cmd_buffers, cmdbuf_count);
+ 
+-   if (result != VK_SUCCESS)
++   if (result != VK_SUCCESS) {
++      pthread_mutex_unlock(&device->submit_mutex);
+       goto out;
++   }
+ 
+    if (has_trace_points) {
+       tu_u_trace_submission_data_create(
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -237,11 +237,31 @@
+    uint32_t vsc_draw_overflow = global->vsc_draw_overflow;
+    uint32_t vsc_prim_overflow = global->vsc_prim_overflow;
+ 
+-   if (vsc_draw_overflow >= dev->vsc_draw_strm_pitch)
++   /* Each overflow doubles a pitch for the device's life, and the device's
++    * visibility stream BO follows it (resolve_vis_stream_patchpoints). On
++    * A8XX the overflow test polls VSC_PIPE_DATA_{DRAW,PRIM}_SIZE, which the
++    * register database lists for A6XX only: bound the growth per pipe
++    * (TU_VSC_MAX_PRIM_KB, default 1024; TU_VSC_MAX_DRAW_KB, default 256) and
++    * say every step, so a run log shows whether and when it grows.
++    */
++   static const uint32_t max_prim =
++      debug_get_num_option("TU_VSC_MAX_PRIM_KB", 1024) * 1024;
++   static const uint32_t max_draw =
++      debug_get_num_option("TU_VSC_MAX_DRAW_KB", 256) * 1024;
++
++   if (vsc_draw_overflow >= dev->vsc_draw_strm_pitch &&
++       dev->vsc_draw_strm_pitch - VSC_PAD < max_draw) {
+       dev->vsc_draw_strm_pitch = (dev->vsc_draw_strm_pitch - VSC_PAD) * 2 + VSC_PAD;
++      mesa_logw("VSC draw stream overflow: %u bytes a pipe now",
++                dev->vsc_draw_strm_pitch);
++   }
+ 
+-   if (vsc_prim_overflow >= dev->vsc_prim_strm_pitch)
++   if (vsc_prim_overflow >= dev->vsc_prim_strm_pitch &&
++       dev->vsc_prim_strm_pitch - VSC_PAD < max_prim) {
+       dev->vsc_prim_strm_pitch = (dev->vsc_prim_strm_pitch - VSC_PAD) * 2 + VSC_PAD;
++      mesa_logw("VSC primitive stream overflow: %u bytes a pipe now",
++                dev->vsc_prim_strm_pitch);
++   }
+ 
+    cmd->vsc_prim_strm_pitch = dev->vsc_prim_strm_pitch;
+    cmd->vsc_draw_strm_pitch = dev->vsc_draw_strm_pitch;

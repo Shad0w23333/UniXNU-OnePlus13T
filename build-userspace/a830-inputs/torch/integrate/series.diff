@@ -1,0 +1,7 @@
+--- a/UniXNU-Pagani_SM8750-gpu/patches/xnu/series
++++ b/UniXNU-Pagani_SM8750-gpu/patches/xnu/series
+@@ -19,3 +19,4 @@
+ phone-system-apps-view.patch
+ phone-gpu-client-memlimits.patch
+ phone-haptics-overlays.patch
++phone-torch-overlay.patch

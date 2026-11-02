@@ -1,0 +1,130 @@
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/ArmCpu.cpp b/ArmCpu.cpp
+--- a/ArmCpu.cpp	2026-10-31 23:57:16
++++ b/ArmCpu.cpp	2026-11-01 12:28:35
+@@ -19,7 +19,6 @@
+ // Kernel-internal entries used for secondary CPU startup (Darwin 23 osfmk).
+ extern "C" vm_offset_t ml_static_vtop (vm_offset_t);
+ extern "C" char LowResetVectorBase[], LowResetVectorEnd[], ResetHandlerData[], const_boot_args[];
+-extern "C" kern_return_t processor_start (processor_t);
+ extern "C" kern_return_t kernel_thread_start (void (*) (void *, wait_result_t), void *, thread_t *);
+ extern "C" void thread_deallocate (thread_t);
+ extern "C" thread_t current_thread (void);
+@@ -102,6 +101,7 @@
+   bool skipGic = false;
+   bool diagnosePower = false;
+   bool secondary = false;
++  bool bootInitialized = false;
+   uint32_t logicalId = 0;
+   bool mapGic (void);
+   bool initDistributor (void);
+@@ -109,8 +109,6 @@
+   bool finishSecondary (void);
+   static void drainPending (void);
+   bool prepareGic (void);
+-  void startSecondary (void);
+-  static void startThread (void *argument, wait_result_t);
+   void enableGic (void);
+   void interrupt (void);
+   static void dispatch (void *target, void *, void *, int);
+@@ -942,11 +940,7 @@
+   info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (physical));
+   info.cluster_type = ml_get_boot_cluster_type ();
+   info.processor_idle = idleConfigure (skipGic);   // pagani-idle; nullptr (XNU's plain WFI) when off
+-  perfmon_interrupt_handler_func pmi = nullptr;
+-  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
+-  if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
+   setCPUNumber (info.log_id);
+-  armcpu_registered = 1;
+   unsigned smp = 0;
+   PE_parse_boot_argn ("sheng-smp", &smp, sizeof (smp));
+   gSmpWanted = smp != 0;
+@@ -965,7 +959,13 @@
+     panic ("ArmCpu: CPU IRQ action registration failed");
+   }
+   gController = controller;
+-  initCPU (true);
++  // ml_processor_register boots the processor (processor_boot): on this CPU that is initCPU, which enables the GIC and the timer, so
++  // everything initCPU and the first interrupt need comes first. A kernel that leaves initCPU to the driver gets it below.
++  perfmon_interrupt_handler_func pmi = nullptr;
++  kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
++  if (status != KERN_SUCCESS) { panic ("ArmCpu: CPU %u registration failed: %d", logicalId, status); }
++  armcpu_registered = 1;
++  if (!bootInitialized) { initCPU (true); }
+   idleStart ();   // pagani-idle: probe and self-test on this CPU while the secondaries are still off
+   registerService ();
+   __atomic_store_n (&gBootRegistered, 1U, __ATOMIC_RELEASE);
+@@ -995,14 +995,15 @@
+   info.cluster_id = static_cast<uint32_t> (ml_get_cluster_number (static_cast<uint32_t> (affinity)));
+   info.cluster_type = ml_get_boot_cluster_type ();
+   info.processor_idle = idleHook ();   // pagani-idle; nullptr when off
++  // ml_processor_register boots this core without waiting for it (processor_boot, startCPU below), so what this thread still has to
++  // say about the core goes first: from there on initCPU, on the new core, owns its state, and kIOCPUStateRunning must not be overwritten.
++  setCPUNumber (info.log_id);
++  setCPUState (kIOCPUStateUninitalized);
++  armcpu_smp_step[logicalId] = 2;
+   perfmon_interrupt_handler_func pmi = nullptr;
+   kern_return_t status = ml_processor_register (&info, &machProcessor, &ipi_handler, &pmi);
+   if (status != KERN_SUCCESS) { armcpu_smp_fail[logicalId] = 4; return false; }
+-  setCPUNumber (info.log_id);
+-  armcpu_smp_step[logicalId] = 2;
+-  setCPUState (kIOCPUStateUninitalized);
+   registerService ();
+-  startSecondary ();
+   return true;
+ }
+ 
+@@ -1036,25 +1037,6 @@
+   return static_cast<int64_t> (x0);
+ }
+ 
+-void ArmCpu::startThread (void *argument, wait_result_t)
+-{
+-  ArmCpu *self = static_cast<ArmCpu *> (argument);
+-  armcpu_smp_step[self->logicalId] = 3;
+-  // Blocks until the new core reaches the scheduler; a core that never arrives only stalls this helper thread.
+-  processor_start (self->machProcessor);
+-  thread_terminate (current_thread ());
+-}
+-
+-void ArmCpu::startSecondary (void)
+-{
+-  thread_t thread;
+-  if (kernel_thread_start (&ArmCpu::startThread, this, &thread) != KERN_SUCCESS) {
+-    armcpu_smp_psci_rc[logicalId] = -1000;
+-    return;
+-  }
+-  thread_deallocate (thread);
+-}
+-
+ void ArmCpu::initCPU (bool boot)
+ {
+   if (secondary) {
+@@ -1086,12 +1068,14 @@
+     // Explicit A/B hardware diagnostic: do not touch GIC MMIO or enable an
+     // interrupt source. CPU registration still happens; the timer is left off.
+     setCPUState (kIOCPUStateRunning);
++    bootInitialized = true;
+     return;
+   }
+   enableGic ();
+   if (gSpiIpi) { spiIpiConfigure (gDist, logicalId, affinity); }
+   enableCPUTimeBase (true);
+   setCPUState (kIOCPUStateRunning);
++  bootInitialized = true;
+   if (gSelfIpi) { signalCPU (this); }
+ }
+ 
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/README.md b/README.md
+--- a/README.md	2026-11-01 00:29:12
++++ b/README.md	2026-11-01 12:44:38
+@@ -6,6 +6,10 @@
+ 
+ Linked into XNU by `unixnu build kernel`.
+ 
++iPadOS 27 copy (xnu-12377): `ml_processor_register` boots the processor itself (`processor_boot`) and `processor_start` is a no-op, so this copy
++installs the interrupt path before it registers the boot CPU, runs `initCPU` once (`bootInitialized`), and sets a secondary's number and state
++before it registers it: from then on the new core owns its state. One processor set, no Edge, no `ml_cpu_init_completed`, as on iPadOS 17.
++
+ Shared peripheral interrupts for drivers (C exports): `armcpu_spi_attach` (Group 1, priority 0xA0, routed to the boot CPU,
+ enabled; the handler runs before the EOI and clears its level source), `armcpu_spi_count`, and `armcpu_spi_disable` /
+ `armcpu_spi_enable` (GICD_ICENABLER with RWP / GICD_ISENABLER) for a line the caller attached; the slot stays, so a storm

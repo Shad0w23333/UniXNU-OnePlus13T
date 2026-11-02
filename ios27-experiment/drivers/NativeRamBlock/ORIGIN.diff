@@ -1,0 +1,186 @@
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/NativeRamBlock.cpp b/NativeRamBlock.cpp
+--- a/NativeRamBlock.cpp	2026-11-01 00:36:40
++++ b/NativeRamBlock.cpp	2026-11-01 12:23:53
+@@ -39,8 +39,9 @@
+ int native_ufs_store_write(uint64_t, uint32_t, const void *) __attribute__((weak_import));
+ int native_ufs_store_sync(void) __attribute__((weak_import));
+ unsigned native_ufs_store_gpt_check(void) __attribute__((weak_import));
+-// Diagnostics. state: 0 off, 1 blank (read-only probe), 2 resumed, 3 fresh, 4 refused/failed, 5 degraded after an I/O error,
+-// 6 resumed read-only (probe). header: persist::checkHeader result.
++// Diagnostics. state: 0 off, 1 blank (read-only probe), 2 resumed, 3 fresh (Install and boot), 4 refused/failed, 5 degraded after an I/O
++// error, 6 resumed read-only (probe), 7 kept: the store holds no Data of this seed and no reset was asked, so it is left untouched and
++// this boot's Data runs from the seed alone (header: why). header: persist::checkHeader result.
+ volatile uint32_t native_data_persist_state = 0, native_data_persist_header = 9, native_data_persist_gpt = 0xff, native_data_persist_gpt_after = 0xff;
+ volatile uint64_t native_data_persist_pages = 0, native_data_persist_loaded = 0, native_data_persist_writes = 0,
+                   native_data_persist_syncs = 0, native_data_persist_errors = 0, native_data_persist_first_lba = 0,
+@@ -76,7 +77,9 @@
+   // Called once, before the Data volume is mounted (native_ram_block_volume_seed): open the store window, put the pages that
+   // earlier boots changed back into the sparse disk, and from then on write changed pages through. The seed identity
+   // (seedHash) is not affected. Any refusal or error leaves the disk volatile, exactly as without persistence.
+-  // sheng-data-reset=1 or 2 starts the overlay over (the old pages are dropped, not applied); 2 also asks for Setup (BootWatchdogPolicy.c).
++  // sheng-data-reset=1 or 2 (the boot menu's Install and boot) starts the overlay over (the old pages are dropped, not applied); 2 also
++  // asks for Setup (BootWatchdogPolicy.c). It is the only way the store is made anew: a store of another seed, a blank or a damaged one
++  // is kept as it is on any other boot.
+   static bool discardRequested() { uint32_t v = 0; return PE_parse_boot_argn("sheng-data-reset", &v, sizeof v) && (v == 1 || v == 2); }
+   void attachStore() {
+     if (!gate) return;
+@@ -107,6 +110,11 @@
+           overlay.active = false;
+         } else if (result == persist::Open::Blank) {
+           native_data_persist_state = 1;
++        } else if (result == persist::Open::Kept) {
++          native_data_persist_state = 7;
++          overlay.active = false;
++          IOLog("NativeRamBlock: the persistent store holds no Data of this seed (header %d); kept, Data runs from the seed: "
++                "use Install and boot to start it over\n", overlay.header);
+         } else if (result == persist::Open::Fresh) {
+           native_data_persist_state = 3;
+           direct = mode == 2;
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/PersistOverlay.h b/PersistOverlay.h
+--- a/PersistOverlay.h	2026-10-29 10:38:54
++++ b/PersistOverlay.h	2026-11-01 12:23:53
+@@ -11,8 +11,9 @@
+ // is written first and the bitmap blocks that gained a bit after it, both before the caller's write completes, so a bit never
+ // promises a page that did not reach the medium, and a page the system was told is written is never lost to a crash. An
+ // overwrite of a page whose bit is set changes only that page.
+-// A header whose page count or seed digest differs from the current seed is stale and is replaced (the overlay starts empty): an
+-// overlay is only ever applied on top of the exact seed it was made against.
++// An overlay is only ever applied on top of the exact seed it was made against. A window that holds no overlay of this seed (blank,
++// damaged, or made against another seed or size) is made anew only when the caller asks for it (`reset`: the boot menu's Install and
++// boot); otherwise it is left as it is (Kept) and the disk runs from the seed alone, so no boot replaces a user's Data by itself.
+ //
+ // Ops: bool read(uint64_t block, uint32_t count, void *dst); bool write(uint64_t block, uint32_t count, const void *src);
+ //      bool sync();   (blocks are relative to the window; sync is only used while the header is made)
+@@ -63,7 +64,9 @@
+   return 0;
+ }
+ 
+-enum class Open { Resumed, Fresh, Blank, Failed };
++// Resumed: this seed's overlay, applied. Fresh: made anew (reset asked). Blank: read only, nothing applied. Kept: no overlay of this
++// seed and no reset asked, the window untouched. Failed: an I/O or format error.
++enum class Open { Resumed, Fresh, Blank, Kept, Failed };
+ 
+ struct Overlay {
+   uint64_t pages = 0, generation = 0, present = 0;
+@@ -73,16 +76,17 @@
+ 
+   bool has (uint64_t i) const { return bitmap[i >> 3] >> (i & 7) & 1; }
+ 
+-  // `readOnly`: never write; a stale or blank window is reported (Blank) and left alone. Otherwise it is initialised: bitmap
+-  // first, header last, so a tear leaves no valid header.
+-  template <class Ops> Open open (Ops &ops, uint64_t pageCount, const uint8_t seed[32], bool ro, uint8_t *bits, bool discard = false)
++  // `readOnly`: never write; a stale or blank window is reported (Blank) and left alone. Otherwise a window without this seed's
++  // overlay is initialised only with `reset` (bitmap first, header last, so a tear leaves no valid header), and kept as it is
++  // without (Kept). `reset` also drops this seed's own overlay.
++  template <class Ops> Open open (Ops &ops, uint64_t pageCount, const uint8_t seed[32], bool ro, uint8_t *bits, bool reset = false)
+   {
+     pages = pageCount; bitmap = bits; readOnly = ro; present = 0; active = false;
+     uint64_t bb = bitmapBlocks (pages);
+     uint8_t block[kBlock];
+     if (!pages || !ops.read (0, 1, block)) return Open::Failed;
+     header = checkHeader (block, pages, seed, &generation);
+-    if (header == 0 && discard && !ro) header = 3;   // the caller asked to start over: handled like a stale overlay
++    if (header == 0 && reset && !ro) header = 3;   // the caller asked to start over: handled like a stale overlay
+     if (header == 0) {
+       for (uint64_t b = 0; b < bb; ++b) if (!ops.read (1 + b, 1, bitmap + b * kBlock)) return Open::Failed;
+       // Bits past the last page must be clear, or the loader would read blocks outside the window.
+@@ -93,6 +97,7 @@
+     }
+     memset (bitmap, 0, bb * kBlock);
+     if (ro) return Open::Blank;
++    if (!reset) return Open::Kept;
+     uint8_t zero[kBlock] = {};
+     for (uint64_t b = 0; b < bb; ++b) if (!ops.write (1 + b, 1, zero)) return Open::Failed;
+     if (!ops.sync ()) return Open::Failed;
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/direct.cpp b/Test/direct.cpp
+--- a/Test/direct.cpp	2026-10-29 10:38:54
++++ b/Test/direct.cpp	2026-11-01 12:24:03
+@@ -34,7 +34,7 @@
+   uint8_t digest[32] = {9};
+   Medium m(windowBlocks(pages));
+   std::vector<uint8_t> bits(bitmapBlocks(pages) * kBlock), stage(8 * kBlock);
+-  Overlay ov; assert(ov.open(m, pages, digest, false, bits.data()) == Open::Fresh);
++  Overlay ov; assert(ov.open(m, pages, digest, false, bits.data(), true) == Open::Fresh);
+   bool storeError = false;
+   std::vector<uint8_t> io(300 * 1024);
+   for (int op = 0; op < 4000; ++op) {
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/persist.cpp b/Test/persist.cpp
+--- a/Test/persist.cpp	2026-10-29 10:38:54
++++ b/Test/persist.cpp	2026-11-01 12:24:03
+@@ -36,9 +36,11 @@
+   const size_t bytes = bitmapBlocks(pages) * kBlock;
+   std::vector<uint8_t> bits(bytes);
+   auto fresh = [&] { return std::vector<uint8_t>(bytes); };
+-  // Blank medium: read-only open must not write and reports Blank; read-write initialises it.
++  // Blank medium: read-only open must not write and reports Blank; read-write keeps it untouched without a reset (Kept) and
++  // initialises it with one (Install and boot).
+   { Overlay o; assert(o.open(m, pages, seedA, true, bits.data()) == Open::Blank && m.writes == 0 && !o.active && o.header == 1); }
+-  Overlay o; assert(o.open(m, pages, seedA, false, bits.data()) == Open::Fresh && o.active && o.present == 0 && o.generation == 1);
++  { Overlay o; assert(o.open(m, pages, seedA, false, bits.data()) == Open::Kept && m.writes == 0 && !o.active && o.header == 1); }
++  Overlay o; assert(o.open(m, pages, seedA, false, bits.data(), true) == Open::Fresh && o.active && o.present == 0 && o.generation == 1);
+   m.fua = true;                                         // from here on writes are durable when they return
+   // Single pages and a run; the bitmap reaches the medium inside the same call.
+   assert(o.writePage(m, 0, pageOf(0x11).data()) && o.writePage(m, 40000, pageOf(0x22).data()) && o.writePage(m, pages - 1, pageOf(0x33).data()));
+@@ -56,10 +58,13 @@
+   }
+   // Rewriting a present page changes no bitmap block.
+   { unsigned before = m.writes; assert(o.writePage(m, 0, pageOf(0x12).data()) && m.writes == before + 1 && o.present == 11); }
+-  // A different seed makes the overlay stale: it is replaced, not applied.
++  // A different seed makes the overlay stale: never applied; kept untouched without a reset, replaced with one.
+   { Medium copy = m; Overlay r; auto b2 = fresh();
+     assert(r.open(copy, pages, seedB, true, b2.data()) == Open::Blank && r.header == 3 && r.present == 0);
+-    assert(r.open(copy, pages, seedB, false, b2.data()) == Open::Fresh && r.generation == 2 && r.present == 0); }
++    const unsigned before = copy.writes;
++    assert(r.open(copy, pages, seedB, false, b2.data()) == Open::Kept && copy.writes == before && !r.active && r.header == 3);
++    Overlay q; auto b3 = fresh(); assert(q.open(copy, pages, seedA, true, b3.data()) == Open::Resumed && q.present == 11);
++    assert(r.open(copy, pages, seedB, false, b2.data(), true) == Open::Fresh && r.generation == 2 && r.present == 0); }
+   // An explicit reset discards a valid overlay for the same seed.
+   { Medium copy = m; Overlay r; auto b2 = fresh();
+     assert(r.open(copy, pages, seedA, false, b2.data(), true) == Open::Fresh && r.present == 0 && r.generation == 2);
+@@ -74,17 +79,18 @@
+     assert(w.open(t, pages, seedA, false, b2.data()) == Open::Resumed);
+     t.failWriteAt = t.writes + 1; assert(!w.writePage(t, 7, pageOf(0x66).data()));
+     Overlay r; auto b3 = fresh(); assert(r.open(t, pages, seedA, true, b3.data()) == Open::Resumed && !r.has(7) && r.present == 11); }
+-  // Damaged header (flip a bit): reported as damaged, read-write open reinitialises with a higher generation.
++  // Damaged header (flip a bit): reported as damaged, kept without a reset, reinitialised with one.
+   { Medium t = m; t.durable[20] ^= 1; Overlay r; auto b2 = fresh();
+     assert(r.open(t, pages, seedA, true, b2.data()) == Open::Blank && r.header == 2);
+-    assert(r.open(t, pages, seedA, false, b2.data()) == Open::Fresh && r.present == 0); }
++    assert(r.open(t, pages, seedA, false, b2.data()) == Open::Kept && r.header == 2);
++    assert(r.open(t, pages, seedA, false, b2.data(), true) == Open::Fresh && r.present == 0); }
+   // Bits beyond the last page are corruption.
+   { Medium t = m; Overlay r; auto b2 = fresh();
+     t.durable[1 * kBlock + 2 * kBlock + 100] |= 0x80;    // inside bitmap block 3 (last), page index >= pages
+     assert(r.open(t, pages, seedA, true, b2.data()) == Open::Failed); }
+   // Failed initialisation leaves no valid header.
+   { Medium t(windowBlocks(pages)); t.failSyncAt = 0; Overlay r; auto b2 = fresh();
+-    assert(r.open(t, pages, seedA, false, b2.data()) == Open::Failed); t.powerLoss();
++    assert(r.open(t, pages, seedA, false, b2.data(), true) == Open::Failed); t.powerLoss();
+     Overlay q; assert(q.open(t, pages, seedA, true, b2.data()) == Open::Blank && q.header == 1); }
+-  puts("PASS: overlay header, bitmap, runs, write order, stale seed, reset, failed writes");
++  puts("PASS: overlay header, bitmap, runs, write order, stale seed kept, reset only on request, failed writes");
+ }
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/seeddisk.cpp b/Test/seeddisk.cpp
+--- a/Test/seeddisk.cpp	2026-10-29 10:38:54
++++ b/Test/seeddisk.cpp	2026-11-01 12:24:03
+@@ -56,7 +56,7 @@
+   // The overlay on a medium of the full window size: header + bitmap for 16.7M pages stay small in memory (the bitmap is pages/8 bytes).
+   Medium m; std::vector<uint8_t> bits(bitmapBlocks(pages) * kBlock); uint8_t digest[32] = {7};
+   assert(bitmapBlocks(pages) == 512);
+-  Overlay ov; assert(ov.open(m, pages, digest, false, bits.data()) == Open::Fresh && windowBlocks(pages) == 1 + 512 + pages);
++  Overlay ov; assert(ov.open(m, pages, digest, false, bits.data(), true) == Open::Fresh && windowBlocks(pages) == 1 + 512 + pages);
+   std::map<uint64_t, std::vector<uint8_t>> oracle;        // page index -> content, for pages that differ from the seed
+   std::vector<uint8_t> io(200000), stage(32 * kBlock); bool storeError = false; srand(3);
+   auto seedPage = [&](uint64_t i) { const uint8_t *p = seed.find(i); return p ? std::vector<uint8_t>(p, p + 4096) : std::vector<uint8_t>(4096, 0); };
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/sparse.cpp b/Test/sparse.cpp
+--- a/Test/sparse.cpp	2026-10-29 10:38:54
++++ b/Test/sparse.cpp	2026-11-01 12:24:37
+@@ -21,7 +21,7 @@
+   if(which==0)bad[0]=0;
+   if(which==1)put32(bad,8,2);
+   if(which==2)put32(bad,12,16384);
+-  if(which==3)put64(bad,16,0x80001000);
++  if(which==3)put64(bad,16,(1ULL<<40)+4096);
+   if(which==4)put64(bad,24,65537);
+   if(which==5)put64(bad,32,1);
+   if(which==6)put64(bad,40,0);

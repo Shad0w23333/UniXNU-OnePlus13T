@@ -1,0 +1,30 @@
+phone-27-pmap-batch-cache-sync.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 48 块（pmap.c）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关（骁龙 SoC 的缓存行为）。
+作用：pmap_batch_set_cache_attributes 改属性时清掉旧缓存行，和 pmap_set_cache_attributes 保持一致。
+这颗 SoC 在页属性变化时不保持缓存行一致，页变成写合并后，清零时留下的脏行可能盖过设备写入的数据。
+必要性：对比文档第 3.2 节写明“只要移植系统 BO 就必须带”。
+
+diff --git a/osfmk/arm/pmap/pmap.c b/osfmk/arm/pmap/pmap.c
+index d453fac..f9a024a 100644
+--- a/osfmk/arm/pmap/pmap.c
++++ b/osfmk/arm/pmap/pmap.c
+@@ -11030,6 +11030,14 @@ pmap_batch_set_cache_attributes_internal(
+ 
+ 			pvh_unlock(pai);
+ 
++			/* UniXNU: as pmap_set_cache_attributes() does, a page leaving write-back loses its lines (pmap_sync_page_attributes_phys).
++			 * This SoC does not keep a page's lines coherent across a change of its attributes: a page made write-combined
++			 * would keep the dirty lines of its cacheable zero-fill, and a later device read through a coherent path could see
++			 * them over data written past the cache. */
++			if (wimg_bits_new != wimg_bits_prev && wimg_bits_new != VM_WIMG_RT) {
++				pmap_sync_wimg(pn, wimg_bits_prev, wimg_bits_new);
++			}
++
+ 			page_index++;
+ 
+ #if XNU_MONITOR

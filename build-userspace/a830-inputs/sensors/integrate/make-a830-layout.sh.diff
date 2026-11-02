@@ -1,0 +1,26 @@
+--- a/工具/make-a830-layout.sh
++++ b/工具/make-a830-layout.sh
+@@ -39,9 +39,10 @@
+ # overrides it (the last value wins).
+ # A830_BATTERY=1 adds boot-arg pagani-battery=1 to the phone-plus/phone-apps forms (17 bytes of the 1000-byte command line):
+ # PaganiBattery, a default-off kernel component, then shows the fuel gauge's charge without the ADSP (pagani-adsp stays unset).
+-# A830_SENSORS=N adds boot-arg pagani-sensors=N (17 bytes): PaganiSensors, a default-off kernel component; 1 publishes the iOS sensor
++# A830_SENSORS=N adds boot-arg pagani-sensors=N (17 or 18 bytes): PaganiSensors, a default-off kernel component; 1 publishes the iOS sensor
+ # services only (MobileGestalt's ambient-light-sensor; no samples), 2 and 3 also need the ADSP (A830_EXTRA_ARGS="pagani-adsp=1"):
+-# 2 looks the sensors up on its sensor hub (boot log only), 3 streams what iOS asks for.
++# 2 looks the sensors up on its sensor hub (boot log only), 3 streams what iOS asks for and makes MobileGestalt's accel and gyro nodes;
++# +4 the FastRPC file service of the sensor PD (5, 6, 7), +8 with 3 the orientation service and its 'ashd' user client (11, 15).
+ # Host test: 工具/test-phone-island-layout.py.
+ set -euo pipefail
+ TOP=/Users/xiaochoumao/unixnu-13t
+@@ -272,8 +273,8 @@
+ [ "${A830_BATTERY:-0}" = 1 ] && KARGS+=(--kernel-arg pagani-battery=1)
+ case "${A830_SENSORS:-0}" in
+     0) ;;
+-    1|2|3) KARGS+=(--kernel-arg "pagani-sensors=$A830_SENSORS") ;;
+-    *) echo 'make-a830-layout: A830_SENSORS takes 0, 1, 2 or 3' >&2; exit 1 ;;
++    1|2|3|5|6|7|11|15) KARGS+=(--kernel-arg "pagani-sensors=$A830_SENSORS") ;;
++    *) echo 'make-a830-layout: A830_SENSORS takes 0, 1, 2, 3, 5, 6, 7, 11 or 15' >&2; exit 1 ;;
+ esac
+ # PaganiDiag runs in place of the system service com.apple.DumpPanic: no launch constraints for it (header above).
+ [ -n "${A830_DIAG:-}" ] && KARGS+=(--kernel-arg sheng-no-lc=1)

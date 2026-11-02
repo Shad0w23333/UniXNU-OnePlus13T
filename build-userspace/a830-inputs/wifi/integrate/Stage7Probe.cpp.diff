@@ -1,0 +1,22 @@
+--- a/UniXNU-Pagani-Drivers/drivers/Stage7Probe/Stage7Probe.cpp
++++ b/UniXNU-Pagani-Drivers/drivers/Stage7Probe/Stage7Probe.cpp
+@@ -45,6 +45,9 @@
+ // The vibrator (drivers/PaganiHaptics, appended to the Adreno830 archive) replaces this default the same way. It reads its own boot
+ // argument pagani-haptics (absent: off; 2: dry run) and returns at once; its own kernel thread does the rest.
+ extern "C" __attribute__((weak)) void pagani_haptics_start(void) {}
++// The Wi-Fi (drivers/PaganiWifi, appended to the Adreno830 archive) replaces this default the same way. It reads its own boot
++// argument pagani-wifi (absent: off) and returns at once; its own kernel thread does the rest.
++extern "C" __attribute__((weak)) void pagani_wifi_start(void) {}
+ static IOService *pendingDisplay,*gpuPresenter;
+ static bool displayInitialized,ephemeralState,frameStatus;
+ static uint64_t frames,clients,aksCalls,aksOpens;
+@@ -295,6 +298,9 @@
+     // The vibrator after the audio service (its API is for the audio side) and the battery (its low-battery rule reads the battery's
+     // status); asynchronous, never blocks the display.
+     pagani_haptics_start();
++    // The Wi-Fi after the ADSP, battery and haptics starts (its RPMh, QMP and GCC vote uses then follow theirs at boot); asynchronous,
++    // never blocks the display.
++    pagani_wifi_start();
+     OSSafeReleaseNULL(ranges);OSSafeReleaseNULL(memory);OSSafeReleaseNULL(typeData);
+     if(!started) {
+         if(attached)display->detach(nub);

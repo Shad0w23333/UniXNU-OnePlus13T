@@ -1,0 +1,63 @@
+--- a/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/AdspCore.c
++++ b/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/AdspCore.c
+@@ -334,9 +334,40 @@
+ }
+ 
+ /* ---- 4..11: the start ---- */
++/* The OnePlus sensor items of the global partition. On Android two kernel modules make them before the DSP starts (vendor_boot's
++ * oplus_sensor_deviceinfo.ko and oplus_sensor_feedback.ko, build-userspace/a830-inputs/sensors/ssc-facts.md 6.2): 130, the device
++ * information the sensor hub reads, all zero on the 13T but the magnetic fusion's block, and 128, zeroed, where the hub leaves its feedback
++ * records. Whether the sensor PD needs them is not known; they cost nothing, and a failure here is only a line. An item that is already
++ * there is not touched. */
++static void oplus_sensor_items(PaganiAdspCore *c)
++{
++    enum {kDevinfo = 130, kDevinfoBytes = 9016, kFeedback = 128, kFeedbackBytes = 3488, kFusionType = 8764, kFusionMag = 6, kFusionDropZero = 8836};
++    uint32_t at = 0, size = 0;
++    PaganiText t;
++    if (!c->have_global) return;
++    int devinfo = PaganiAdspErrLock, feedback = PaganiAdspErrLock;
++    if (c->ops->hwlock(CTX, 1)) {
++        devinfo = qcom_smem_alloc(&c->smem, &c->global, kDevinfo, kDevinfoBytes);
++        feedback = qcom_smem_alloc(&c->smem, &c->global, kFeedback, kFeedbackBytes);
++        c->ops->hwlock(CTX, 0);
++    }
++    if (devinfo == QcomSmemOk && !item(c, &c->global, kDevinfo, &at, &size) && size >= kDevinfoBytes) {
++        for (uint32_t i = 0; i < kDevinfoBytes; i += 4) qcom_smem_write32(&c->smem, at + i, 0);
++        qcom_smem_write32(&c->smem, at + kFusionType, kFusionMag);
++        qcom_smem_write32(&c->smem, at + kFusionDropZero, 1);
++    }
++    if (feedback == QcomSmemOk && !item(c, &c->global, kFeedback, &at, &size) && size >= kFeedbackBytes)
++        for (uint32_t i = 0; i < kFeedbackBytes; i += 4) qcom_smem_write32(&c->smem, at + i, 0);
++    line_begin(c, &t, "smem oplus sensor items");
++    pagani_text_kd(&t, "130", devinfo);
++    pagani_text_kd(&t, "128", feedback);
++    line_end(c);
++}
++
+ static int smp2p(PaganiAdspCore *c)
+ {
+     uint32_t at = 0, size = 0;
++    oplus_sensor_items(c);
+     int rc = allocate(c, PaganiAdspItemSmp2pOut, QCOM_SMP2P_ITEM_BYTES);
+     if (!rc) rc = item(c, &c->part, PaganiAdspItemSmp2pOut, &at, &size);
+     if (rc) return fail(c, PaganiAdspStSmp2p, rc, "smp2p item 429");
+--- a/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/Test/core.c
++++ b/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/Test/core.c
+@@ -533,6 +533,17 @@
+     /* handover dropped the votes, after ready */
+     CHECK(strstr(sequence, "auth:1 rails:off") != 0 && core.handover && !core.votes_on);
+     CHECK(core.status.stage == PaganiAdspStChannel && core.glink.version_agreed && core.glink.features == 1);
++    /* the OnePlus sensor items in the global partition, as Android's modules leave them */
++    {
++        uint32_t at = 0, size = 0;
++        CHECK(qcom_smem_find(&dsp.view, &dsp.global, 130, &at, &size) == 0 && size >= 9016);
++        for (uint32_t i = 0; i < 9016; i += 4) {
++            uint32_t word;
++            memcpy(&word, smem + at + i, 4);
++            CHECK(word == (i == 8764 ? 6u : i == 8836 ? 1u : 0u));
++        }
++        CHECK(qcom_smem_find(&dsp.view, &dsp.global, 128, &at, &size) == 0 && size >= 3488);
++    }
+     CHECK(core.status.channels_up == 7);    /* IPCRTR, PMIC_RTR_ADSP_APPS, adsp_apps */
+     CHECK(battery.ups == 1 && audio.ups == 1 && dsp.seen_pmic.messages == 1 && !memcmp(dsp.seen_pmic.last, "early", 5));
+     CHECK(battery.messages == 1 && battery.last[0] == ('e' ^ 0xff));

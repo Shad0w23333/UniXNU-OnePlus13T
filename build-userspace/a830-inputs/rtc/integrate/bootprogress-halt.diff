@@ -1,0 +1,297 @@
+--- a/drivers/BootProgress/RamoopsLog.c
++++ b/drivers/BootProgress/RamoopsLog.c
+@@ -218,6 +218,7 @@
+ #endif
+ 
+ #define PSCI_VERSION 0x84000000u
++#define PSCI_SYSTEM_OFF 0x84000008u
+ #define PSCI_SYSTEM_RESET 0x84000009u
+ #define PSCI_FEATURES 0x8400000au
+ #define PSCI_SYSTEM_RESET2_64 0xc4000012u   // reset_type 0: SYSTEM_WARM_RESET (architectural), cookie 0
+@@ -264,6 +265,7 @@
+ static uint64_t start_counter, counter_hz, heartbeat_at;
+ static uint32_t reset_after_seconds, panic_reset_seconds, reset_cold, reset_wdog;
+ static int reset_cold_skipped;              // pagani-reset-seq: the download mode did not read back 0, so not without SYSTEM_RESET2
++static int reset_power_off;                 // ramoops_log_power_off: SYSTEM_OFF first
+ static uint64_t reset_deadline;             // counter value; 0: no timed reset
+ static int reset_armed, reset_started, headless_panic, reset_parked;
+ static uint64_t reset_started_at;          // counter value when reset_now began (the observer's late retry)
+@@ -847,7 +849,9 @@
+ // on this CPU meanwhile, as in machine_restart; the caller's state comes back for the PSCI reset unless 0x008 parked the other CPUs.
+ static void reset_seq_run(const char *reason)
+ {
+-    const uint32_t mask = reset_seq_mask;
++    // A power off takes the steps Android takes before it too, but for the OEM warm reboot, which would restart the phone instead.
++    const int power_off = __atomic_load_n(&reset_power_off, __ATOMIC_ACQUIRE);
++    const uint32_t mask = power_off ? reset_seq_mask & ~(uint32_t)RAMOOPS_RESET_SEQ_OEM : reset_seq_mask;
+     const uint64_t began = log_counter();
+     // F1 of the 2026-10-31 review: a warm reset with the download mode set ends in the crash dump (XBL waits for a USB host, or a
+     // mini dump goes to the phone's storage), and Android clears the mode before every reboot (13T qcom_dload_reboot: NODUMP first,
+@@ -910,7 +914,7 @@
+     text_start(&t, reset_seq_text, sizeof(reset_seq_text));
+     put_str(&t, "reset seq done in ");
+     put_dec(&t, counter_hz ? (log_counter() - began) * 1000 / counter_hz : 0);
+-    put_str(&t, " ms; resetting through PSCI");
++    put_str(&t, power_off ? " ms; powering off through PSCI" : " ms; resetting through PSCI");
+     reset_seq_record(RAMOOPS_KIND_RESET, reset_seq_text);
+ }
+ 
+@@ -933,8 +937,9 @@
+         return;
+     }
+     reset_seq_run(reason);
+-    // The watchdog held through the steps (reset_now) goes off now, right before PSCI, as for a reset without them.
+-    ramoops_platform_wdog_release(reason);
++    // The watchdog held through the steps (reset_now) goes off now, right before PSCI, as for a reset without them; a power off keeps
++    // it armed through SYSTEM_OFF.
++    if (!__atomic_load_n(&reset_power_off, __ATOMIC_ACQUIRE)) ramoops_platform_wdog_release(reason);
+     __atomic_store_n(&reset_seq_state, RESET_SEQ_DONE, __ATOMIC_RELEASE);
+ }
+ 
+@@ -953,14 +958,17 @@
+ // goes straight to PSCI.
+ static void reset_now(const char *reason)
+ {
++    const int power_off = __atomic_load_n(&reset_power_off, __ATOMIC_ACQUIRE);
+     // pagani-reset-wdog=1 with pagani-wdog: the watchdog's bite resets (it kept the log where SYSTEM_RESET flipped weak DRAM cells);
+-    // PSCI only if no bite came within 10 s. Otherwise no watchdog bite races the PSCI reset (GunyahWdog.h).
++    // PSCI only if no bite came within 10 s. Otherwise no watchdog bite races the PSCI reset (GunyahWdog.h). A power off never takes
++    // the bite, which would restart the phone.
+     int bite = 0, held = 0;
+-    if (reset_wdog) bite = ramoops_platform_wdog_bite(reason);
++    if (reset_wdog && !power_off) bite = ramoops_platform_wdog_bite(reason);
+     // pagani-reset-seq: the watchdog stays armed through the steps instead, with its shortest bite from a pet now, so a step that
+     // never returns still ends in a bite (S3 of the 2026-10-31 review: disabled here first, such a step left only a manual reset);
+-    // reset_seq disables it after them.
+-    if (!bite && reset_seq_mask) held = ramoops_platform_wdog_hold(reason);
++    // reset_seq disables it after them. A power off holds it the same way, through SYSTEM_OFF too: a firmware that neither powers off
++    // nor answers still ends in the bite.
++    if (!bite && (reset_seq_mask || power_off)) held = ramoops_platform_wdog_hold(reason);
+ #ifndef RAMOOPS_LOG_TEST
+     if (!bite && !held) gunyah_wdog_before_reset(reason);
+ #else
+@@ -984,6 +992,7 @@
+         put_str(&t, "ms ");
+         put_psci(&t);
+         if (bite) put_str(&t, "; first the watchdog bite (pagani-reset-wdog)");
++        if (power_off) put_str(&t, "; first SYSTEM_OFF (0x84000008)");
+         emit_text(RAMOOPS_KIND_RESET, reset_text);
+         zones_stamp();
+         unlock_log(flags);
+@@ -1001,6 +1010,18 @@
+         }
+     }
+ #endif
++    // Gunyah passes the HLOS VM's SYSTEM_OFF to the firmware and does not come back; one that does comes back refused, and a phone that
++    // would not power off restarts as for any other reset. Only the first resetter powers off: a later one is here because of a panic
++    // or a timer.
++    if (first && power_off) {
++        int64_t result = ramoops_platform_psci(psci_hvc, PSCI_SYSTEM_OFF, 0, 0, 0);
++        text_start(&t, reset_text, sizeof(reset_text));
++        put_str(&t, "SYSTEM_OFF returned ");
++        put_result(&t, result);
++        put_str(&t, "; resetting instead");
++        log_reset_text();
++        ramoops_platform_wdog_release(reason);
++    }
+     if (psci_reset2()) {
+         int64_t result = ramoops_platform_psci(psci_hvc, PSCI_SYSTEM_RESET2_64, 0, 0, 0);
+         if (first) {
+@@ -1029,6 +1050,14 @@
+ 
+ void ramoops_log_suspend(void) { log_enabled = 0; }
+ 
++void ramoops_log_restart(const char *reason) { reset_now(reason); }
++
++void ramoops_log_power_off(const char *reason)
++{
++    __atomic_store_n(&reset_power_off, 1, __ATOMIC_RELEASE);
++    reset_now(reason);
++}
++
+ const char *ramoops_log_status(void) { return status[0] ? status : NULL; }
+ 
+ static void put_seconds_config(struct text *t)
+@@ -1105,7 +1134,7 @@
+     reset_started_at = 0; reset_observer_retries = 0;
+     reset_timer_cpu = -1; reset_backup_cpu = -1; reset_backup_armed = 0;
+     reset_seq_mask = 0; reset_cpus_parked = 0; reset_seq_state = RESET_SEQ_IDLE; reset_seq_probed = 0; reset_seq_screen[0] = 0;
+-    reset_seq_refused = 0; reset_cold_skipped = 0;
++    reset_seq_refused = 0; reset_cold_skipped = 0; reset_power_off = 0;
+     console_line.length = 0; console_line.continued = 0; panic_line.length = 0; panic_line.continued = 0;
+     console_line.area = AREA_CONSOLE; panic_line.area = AREA_EVENTS;
+     rowsets[0].valid = 0; rowsets[1].valid = 0; rowsets[0].sets = 0; rowsets[1].sets = 0;
+--- a/drivers/BootProgress/RamoopsLog.h
++++ b/drivers/BootProgress/RamoopsLog.h
+@@ -66,6 +66,15 @@
+ // parser keeps) and with no bit beyond RAMOOPS_RESET_SEQ_KNOWN: XNU's parser turns "0X10F" or a word into the bytes of its first
+ // three characters, "010" into octal 8, a bare "pagani-reset-seq" into 1 and more than 8 hex digits into their low 32 bits.
+ // Anything else refuses all of it (nothing runs, as without the boot-arg; one T record and the status line say so).
++//
++// ramoops_log_restart and ramoops_log_power_off are the platform expert's restart and power off (PaganiArmDTPlatform haltRestart,
++// pagani-halt): the same reset, from thread or panic context, with `reason` in its "reset reason" record, pagani-reset-seq's steps, the
++// watchdog handling and pagani-reset-wdog's bite. A power off then differs in three things: the first resetter calls PSCI SYSTEM_OFF
++// (0x84000008) where the reset would start, which reaches the firmware for the HLOS VM (Gunyah psci_system_off) and is the call Android
++// powers off with (13T psci_sys_poweroff); pagani-reset-seq skips its OEM warm reboot and pagani-reset-wdog its bite, either of which
++// would restart the phone; and an armed pagani-wdog stays armed through the call, with its shortest bite from a pet right before, so a
++// firmware that neither powers off nor answers ends in the bite. Should SYSTEM_OFF return, one T record says so and the reset follows.
++// DRAM does not survive a power off, so these records are only readable when it did not happen.
+ #ifndef PAGANI_RAMOOPS_LOG_H
+ #define PAGANI_RAMOOPS_LOG_H
+ #include <stdint.h>
+@@ -162,6 +171,9 @@
+ // After the panic screen: flushes, waits pagani-panic-reset seconds (or for the pagani-reset-after deadline) and resets;
+ // returns at once when neither is set.
+ void ramoops_log_panic_reset(void);
++// The platform's restart and power off (the header above). Neither returns on the device.
++void ramoops_log_restart(const char *reason);
++void ramoops_log_power_off(const char *reason);
+ // The 1 Hz observer: stale partial console lines, the heartbeat, the reset-timer fallback, the late retry of a reset that did not
+ // land and the arming of the second reset timer.
+ void ramoops_log_tick(uint64_t polls, uint64_t timer_interrupts, uint64_t free_pages, uint64_t available_pages);
+--- a/drivers/BootProgress/Test/ramoops.c
++++ b/drivers/BootProgress/Test/ramoops.c
+@@ -30,7 +30,7 @@
+ static const char *boot_args_text = "-v serial=0 pagani-ramoops=1";
+ static uint32_t psci_version_value = 0x10001;
+ static int32_t reset2_features_value = 0;
+-static int64_t reset2_result = -2, reset_result = -1;
++static int64_t reset2_result = -2, reset_result = -1, off_result = -1;
+ static char method_value[4] = "smc";
+ static int method_present = 1;
+ static struct { int hvc, masked; uint64_t function, a, b, c; } calls[64];   // masked: RamoopsLog's DAIF stand-in at the call
+@@ -96,6 +96,7 @@
+     case 0x8400000a: return a == 0xc4000012 ? (int64_t)(uint32_t)reset2_features_value : -1;
+     case 0xc4000012: return reset2_result;
+     case 0x84000009: return reset_result;
++    case 0x84000008: return off_result;
+     default: assert(0); return -1;
+     }
+ }
+@@ -276,7 +277,7 @@
+     ramoops_log_suspend();
+     call_count = 0; timer_arms = 0; timer_ms = 0; maps = 0; clock_step = 1;
+     timer_cpu_value = 0; observer_cpu = 0; backup_cpu_armed = -1; backup_avoided = -2; backup_ms = 0; backup_calls = 0; backup_arms = 0;
+-    psci_version_value = 0x10001; reset2_features_value = 0; reset2_result = -2; reset_result = -1;
++    psci_version_value = 0x10001; reset2_features_value = 0; reset2_result = -2; reset_result = -1; off_result = -1;
+     memcpy(method_value, "smc", 4); method_present = 1;
+     ram_base = 0x8c0000000ULL; ram_bytes = 0x100000000ULL;
+     boot_args_text = "-v serial=0 pagani-ramoops=1";
+@@ -1101,7 +1102,8 @@
+ 
+ // ---- pagani-reset-seq -------------------------------------------------------------------------------------------------------
+ enum { FN_IO_READ = 0xc2000501, FN_IO_WRITE = 0xc2000502, FN_SDI = 0xc2000109, FN_ARB = 0xc2000901, FN_OEM = 0xc3000922,
+-       FN_AVAIL = 0x42000601, FN_VERSION = 0x84000000, FN_FEATURES = 0x8400000a, FN_RESET2 = 0xc4000012, FN_RESET = 0x84000009 };
++       FN_AVAIL = 0x42000601, FN_VERSION = 0x84000000, FN_FEATURES = 0x8400000a, FN_RESET2 = 0xc4000012, FN_RESET = 0x84000009,
++       FN_OFF = 0x84000008 };
+ 
+ static void expect_trace(unsigned from, const uint64_t *ids, unsigned n)
+ {
+@@ -1825,6 +1827,89 @@
+     assert(!fclose(f));
+     printf("dumped %u records (seq %u..%u; boot %u, events %u, console %u) in %u copies of 0x%x bytes\n", n, records[0].seq,
+            records[n - 1].seq, found[0], found[1], found[2], copy_count, copy_bytes);
++}
++
++// The platform expert's restart and power off (PaganiArmDTPlatform haltRestart, pagani-halt). A restart is any other reset with its reason
++// in the record. A power off calls SYSTEM_OFF after the same record and steps, once, with the watchdog held through the call instead of
++// taking its bite, and resets when the call comes back.
++static void test_platform_halt(void)
++{
++    fresh();
++    arg("pagani-ramoops", 1);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++    ramoops_log_putc('h'); ramoops_log_putc('i');    // a partial line is flushed first, as for any reset
++    ramoops_log_restart("restart");
++    static const uint64_t restart[] = {FN_VERSION, FN_FEATURES, FN_RESET2, FN_RESET};
++    expect_trace(0, restart, 4);
++    assert(trace_count == 4 && !hold_calls && !bite_calls);
++    unsigned n = read_all();
++    const struct rec *r = find(n, 'C', "hi");
++    assert(r && r[1].kind == 'T' && !strncmp(r[1].text, "reset reason=restart up=", 24) && !strstr(r[1].text, "SYSTEM_OFF"));
++    r = next_is(r + 1, 'T', "SYSTEM_RESET2 returned -2; trying SYSTEM_RESET");
++    r = next_is(r, 'T', "SYSTEM_RESET returned -1; retrying once a second, watchdog armed");
++
++    // pagani-reset-wdog=1 restarts through the bite, as the timed reset does.
++    fresh();
++    arg("pagani-ramoops", 1); arg("pagani-reset-wdog", 1);
++    bite_answer = 1;
++    assert(ramoops_log_vm_ready());
++    ramoops_log_restart("restart");
++    assert(bite_calls == 1 && !hold_calls);
++    assert(find(read_all(), 'T', "first the watchdog bite (pagani-reset-wdog)"));
++
++    // The power off, no steps: the hold, SYSTEM_OFF (it may come back on a firmware that refuses), the release, the reset as usual.
++    fresh();
++    seq_expected = 1;
++    arg("pagani-ramoops", 1);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++    ramoops_log_power_off("power off");
++    static const uint64_t power_off[] = {FN_VERSION, FN_FEATURES, TRACE_HOLD, FN_OFF, TRACE_RELEASE, FN_RESET2, FN_RESET};
++    expect_trace(0, power_off, 7);
++    assert(trace_count == 7 && hold_calls == 1 && release_calls == 1 && !smc_count);
++    n = read_all();
++    r = find(n, 'T', "reset reason=power off up=");
++    assert(r && strstr(r->text, "; first SYSTEM_OFF (0x84000008)"));
++    r = next_is(r, 'T', "SYSTEM_OFF returned -1; resetting instead");
++    r = next_is(r, 'T', "SYSTEM_RESET2 returned -2; trying SYSTEM_RESET");
++    r = next_is(r, 'T', "SYSTEM_RESET returned -1; retrying once a second, watchdog armed");
++    ramoops_log_power_off("power off");              // a second caller, or the timer: straight to the reset, no second SYSTEM_OFF
++    ramoops_log_timer_fired();
++    assert(trace_how_many(FN_OFF) == 1 && trace_how_many(TRACE_RELEASE) == 1 && read_all() == n);
++
++    // pagani-reset-wdog=1: never the bite on a power off, which would restart the phone.
++    fresh();
++    seq_expected = 1;
++    arg("pagani-ramoops", 1); arg("pagani-reset-wdog", 1);
++    bite_answer = 1;
++    assert(ramoops_log_vm_ready());
++    ramoops_log_power_off("power off");
++    assert(!bite_calls && hold_calls == 1 && trace_how_many(FN_OFF) == 1);
++    n = read_all();
++    assert(!find(n, 'T', "watchdog bite") && find(n, 'T', "; first SYSTEM_OFF (0x84000008)"));
++
++    // pagani-reset-seq: the steps Android takes first, but for the OEM warm reboot; the watchdog stays held until SYSTEM_OFF came back.
++    seq_setup(0x1f, 0);
++    park_signalled = 7; park_arrive = 7;
++    ramoops_log_start();
++    unsigned before = trace_count;
++    ramoops_log_power_off("power off");
++    static const uint64_t steps[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI, FN_ARB, TRACE_PARK, FN_OFF, TRACE_RELEASE,
++                                     FN_RESET2, FN_RESET};
++    expect_trace(before, steps, 11);
++    assert(!trace_how_many(FN_OEM) && release_calls == 1);
++    n = read_all();
++    assert(find(n, 'T', "reset seq 0xf (pagani-reset-seq) reason=power off: dload-clear sdi-off spmi-halt park-cpus"));
++    assert(find(n, 'T', "ms; powering off through PSCI") && !find(n, 'U', "OEM warm reboot"));
++
++    // The log off: the same calls, no records.
++    fresh();
++    seq_expected = 1;
++    assert(!ramoops_log_vm_ready());
++    ramoops_log_power_off("power off");
++    expect_trace(0, power_off + 2, 1);
++    assert(trace_how_many(FN_OFF) == 1 && trace_how_many(FN_RESET) == 1 && !maps);
+ }
+ 
+ int main(int argc, char **argv)
+@@ -1860,6 +1945,7 @@
+     test_reset_seq_refused();
+     test_reset_seq_once();
+     test_reset_seq_paths();
++    test_platform_halt();
+     fresh();
+     free(region); free(records);
+     puts("PASS: ramoops records and CRC32, Linux-valid zone headers (start 0, whole zone), 36 identical copies of 0xfffc "
+@@ -1878,6 +1964,8 @@
+          "to the reset after the CPU park only, masks refused unless written 0x and 1 to 8 hex digits with known bits (XNU's "
+          "0X, word, octal, decimal, binary, bare and overlong forms; the last occurrence), once per boot (later triggers, the "
+          "observer's retry, a nested resetter that waits 2 s, two racing threads x64), the panic and headless panic paths, the "
+-         "watchdog-bite path (none), the log off");
++         "watchdog-bite path (none), the log off; the platform's restart (its reason in the record, the bite with pagani-reset-wdog) "
++         "and power off (SYSTEM_OFF once, after the steps but the OEM reboot, the watchdog held through it, no bite, the reset if it "
++         "comes back)");
+     return 0;
+ }

@@ -1,0 +1,11 @@
+--- drivers/PaganiInput/Test/peripherals.cpp	2026-10-31 17:34:54
++++ ../new/drivers/PaganiInput/Test/peripherals.cpp	2026-10-31 17:35:32
+@@ -716,7 +716,7 @@
+     MMIO m;m.dsi=true;m.regs[4]=1;m.regs[0x110]=0x20010102;m.regs[0x3c]=0xa5;m.regs[0x390]=2;m.regs[0x4c]=32;
+     auto io=m.io();assert(!dsi_panel_command(&io,0x51,0x599));
+     std::vector<uint32_t> fifo;for (auto [reg,value]:m.writes) if (reg==0x17c) fifo.push_back(value);
+-    assert(fifo==std::vector<uint32_t>({0xc0390003,0xff059951}));
++    assert(fifo==std::vector<uint32_t>({0xc0390003,0xff990551}));  // 51 05 99: high byte first, as the panel's own 51 0d bb table
+     assert(m.regs[0x3c]==0xa5 && m.regs[0x390]==2 && m.regs[0x4c]==32 && !m.regs[0x15c]);
+     assert((m.regs[0x110]&0x10100)==0x10100); // Do not acknowledge unrelated frame completions.
+     m.writes.clear();assert(!dsi_panel_command(&io,0x28,0));

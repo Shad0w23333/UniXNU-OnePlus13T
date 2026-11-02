@@ -1,0 +1,25 @@
+--- a/UniXNU/components.toml
++++ b/UniXNU/components.toml
+@@ -986,3 +986,22 @@
+ build_stage = "kernel"
+ build = ["{component}/scripts/build-pagani-speaker.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+ outputs = ["build/pagani-speaker/libPaganiSpeaker.a"]
++
++[[component]]
++id = "PaganiTorch"
++kind = "driver"
++function = "OnePlus 13T torch: the PM8550 flash LED module over SPMI (channels 0 and 1, 50 mA default, at most 200 mA per channel, 5 minute limit, off on any fault) with whitelisted, owner-checked writes, kern.pagani_torch, and the iOS flashlight's service without a camera"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/PaganiTorch"
++hardware = ["OnePlus 13T PKX110", "SM8750", "PM8550"]
++os_abi = ["ipados-17.7.11-21H461"]
++board_dependencies = ["Stage7Probe calls pagani_torch_start", "pagani-torch=1 (2: dry run; absent: off)", "pagani-torch-ios=1 needs phone-torch-overlay.patch and the plug-in in the Data seed and the owner trust cache"]
++verified_devices = []
++dependencies = ["Adreno830", "Stage7Probe", "BootProgress"]
++source_files = ["PaganiTorch.cpp", "PaganiTorchIos.cpp", "PaganiTorchSysctl.c", "TorchCore.c", "TorchSpmi.c", "TorchIos.c"]
++runtime_identifiers = ["AppleH6CamIn", "PaganiTorchUserClient", "pagani_torch_start", "pagani_torch_status", "pagani_torch_set", "pagani_torch_request", "pagani_torch_level", "pagani_torch_ios_commit", "pagani_torch_ios_status"]
++build_stage = "kernel"
++build = ["{component}/scripts/build-pagani-torch.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
++outputs = ["build/pagani-torch/libPaganiTorch.a"]

@@ -1,0 +1,312 @@
+--- drivers/PaganiPanel/PaganiPanel.cpp	2026-10-31 17:34:54
++++ ../new/drivers/PaganiPanel/PaganiPanel.cpp	2026-10-31 17:43:47
+@@ -9,6 +9,7 @@
+ #include <pexpert/pexpert.h>
+ #include "../BootProgress/PeripheralStatus.h"
+ #include "PanelPower.h"
++#include "PanelBrightness.h"
+ 
+ // The display's power as the system set it last, for the screen-off policies of PaganiArmCpu (pagani-screenoff bit 0) and Adreno830
+ // (bits 1 and 3): bit 0 set while the display is off, the number of changes above it (a reader that missed an off and an on still
+@@ -17,24 +18,37 @@
+ __attribute__((weak)) volatile uint32_t pagani_screen_state;
+ }
+ 
+-// The display PM callback publishes a value, never a pointer into a detachable service.
++// The display PM callback publishes a value, never a pointer into a detachable service; the timer only exists while the service
++// runs, and a started service stays until reboot.
+ static unsigned requestedPower=1;
++static IOTimerEventSource *volatile panelTimer;
+ extern "C" void pagani_panel_set_power(unsigned on) {
+     __atomic_store_n(&requestedPower,on?1:0,__ATOMIC_RELEASE);
+     const uint32_t state=__atomic_load_n(&pagani_screen_state,__ATOMIC_RELAXED);
+     if ((state&1u)!=(on?0u:1u)) __atomic_store_n(&pagani_screen_state,((state|1u)+1u)|(on?0u:1u),__ATOMIC_RELEASE);
++    if (IOTimerEventSource *timer=__atomic_load_n(&panelTimer,__ATOMIC_ACQUIRE)) timer->setTimeoutUS(1);
+ }
+ 
++// boot-arg pagani-panel: bit 0 runs this driver (Stage7Probe), bit 1 publishes the backlight even when the first DCS failed, to test
++// CoreBrightness's side alone; bit 3 sends the brightness in low-power mode instead of high-speed.
++enum { PANEL_OPTION_PUBLISH_ALWAYS = 2, PANEL_OPTION_LP = 8 };
++// A DCS that found the engine busy or disabled changed nothing and is sent again this much later, at most this many times in a row.
++enum { PANEL_RETRY_MS = 100, PANEL_RETRIES = 600 };
++enum { PANEL_REPORT_FIRST_MS = 45000, PANEL_REPORT_MS = 60000, PANEL_REPORTS = 30 };
++
+ class PaganiPanel : public AppleARMBacklight {
+     OSDeclareDefaultStructors(PaganiPanel)
+     PeripheralWindow dsi;
+     IOWorkLoop *loop=nullptr;
+-    IOTimerEventSource *timer=nullptr;
++    IOTimerEventSource *timer=nullptr,*reporter=nullptr;
+     bool added=false,running=false,failed=false;
+-    unsigned appliedPower=1,level=PAGANI_BRIGHTNESS_DEFAULT;
+-    uint32_t requestedLevel=PAGANI_BRIGHTNESS_DEFAULT;
+-    bool first=true;
++    unsigned appliedPower=1,sendMode=0,retries=0,reports=0;
+     uint64_t commands=0;
++    pagani_brightness bright{};
++    // The newest brightness asked for (PanelBrightness.h), taken by the work loop.
++    volatile uint64_t request=0;
++    uint32_t requests=0,writes=0,retried=0;
++    int lastError=0;
+     // pagani-screenoff bit 2: the vendor's off and on sequences with sleep mode (PanelPower.h) instead of 0x28/0x29 alone.
+     bool sleepMode=false,stale=false;
+     pagani_panel_power sequence{};
+@@ -45,6 +59,22 @@
+     static int sendPacket(void *context,uint8_t type,const uint8_t *payload,unsigned length) {
+         return dsi_panel_packet(static_cast<const peripheral_io *>(context),type,payload,length);
+     }
++    // The controller as it is now, in two U records: the first DSI read of this port is on no log (the events ring keeps the last 32 KiB).
++    void logState(const char *when) {
++        auto io=dsi.io();dsi_panel_state s;dsi_panel_snapshot(&io,&s);
++        char line[120];
++        snprintf(line,sizeof line,"panel: %s ver %x ctrl %x st %x fifo %x dma %x trig %x",when,s.version,s.ctrl,s.status,s.fifo,s.dma,s.trigger);
++        boot_progress_trace(line);
++        snprintf(line,sizeof line,"panel: %s lanes %x int %x clk %x tpg %x ack %x to %x sec %x split %x",when,s.lanes,s.ints,s.clocks,s.tpg,s.ack,s.timeout,s.secure,s.split);
++        boot_progress_trace(line);
++    }
++    void logCounters() {
++        char line[120];
++        snprintf(line,sizeof line,"panel: requests %u writes %u retried %u shown %u goal %u rc %d mode %u power %u/%u%s",
++                 __atomic_load_n(&requests,__ATOMIC_RELAXED),writes,retried,bright.shown,bright.to,lastError,sendMode,appliedPower,
++                 __atomic_load_n(&requestedPower,__ATOMIC_RELAXED),__atomic_load_n(&failed,__ATOMIC_RELAXED)?" stopped":"");
++        boot_progress_trace(line);
++    }
+     // The ramoops log (U records): each finished sequence once, and the failure that disabled the panel.
+     void noteSequence() {
+         char line[96];
+@@ -55,79 +85,131 @@
+                  (unsigned long long)(sequence.lastNs/1000000),sequence.sleeps,sequence.wakes,sequence.packets);
+         boot_progress_trace(line);
+     }
++    // A request taken here starts a fade from the level shown.
++    void takeRequest(uint64_t now) {
++        const uint64_t word=__atomic_exchange_n(&request,0ull,__ATOMIC_ACQUIRE);
++        if (pagani_brightness_request_valid(word))
++            pagani_brightness_begin(&bright,pagani_brightness_request_level(word),pagani_brightness_request_fade(word),now);
++    }
++    int sendLevel(const peripheral_io *io,uint32_t level) {
++        const int rc=dsi_panel_command_mode(io,0x51,level,sendMode);
++        if (!rc) {
++            bright.shown=level;++writes;
++            __atomic_add_fetch(&commands,1,__ATOMIC_RELAXED);
++        }
++        observe("DSI brightness",rc,level);
++        return rc;
++    }
++    // After a tick's commands: a command that was not sent (-19 enable bit or test FIFO, -16 engine busy for 20 ms) is sent again a
++    // little later, a bounded number of times; anything else stops the panel requests, as a command the engine may still own must not
++    // be followed by another. True: rearm as usual.
++    bool settle(int rc,const char *what) {
++        if (!rc) {retries=0;return true;}
++        lastError=rc;
++        if ((rc==-19 || rc==-16) && ++retries<=PANEL_RETRIES) {
++            ++retried;
++            if (retries==1) {logState("retry");logCounters();}
++            timer->setTimeoutMS(PANEL_RETRY_MS);
++            return false;
++        }
++        __atomic_store_n(&failed,true,__ATOMIC_RELEASE);setProperty("PanelError",(uint32_t)rc,32);
++        char line[96];
++        snprintf(line,sizeof line,"panel: DSI failed %d at %s; requests disabled",rc,what);
++        boot_progress_trace(line);
++        logState("failed");logCounters();
++        IOLog("Pagani panel command failed: %d; requests disabled\n",rc);
++        return false;
++    }
+     // One tick with the sleep option: the running sequence (or the next one the request needs), then the brightness once the panel
+     // shows again (rewritten after sleep mode). A failure disables requests as the default path does.
+-    void tickSequenced() {
++    void tickSequenced(uint64_t now) {
+         const unsigned power=__atomic_load_n(&requestedPower,__ATOMIC_ACQUIRE);
+-        const unsigned goal=__atomic_load_n(&requestedLevel,__ATOMIC_ACQUIRE);
+         auto io=dsi.io();bool changed=false;
+         uint64_t wait=0;unsigned finished=0;
+         const uint32_t sent=sequence.packets;
+-        int rc=pagani_panel_power_step(&sequence,nowNs(),power,sendPacket,&io,&wait,&finished);
++        int rc=pagani_panel_power_step(&sequence,now,power,sendPacket,&io,&wait,&finished);
+         if (sequence.packets!=sent) __atomic_add_fetch(&commands,sequence.packets-sent,__ATOMIC_RELAXED);
+         if (sequence.packets!=sent || rc) observe(rc?"DSI sequence":"DSI power",rc,(uint32_t)sequence.state<<8|sequence.next);
+         if (finished) noteSequence();
+         if (!rc && sequence.refresh) {sequence.refresh=0;stale=true;}
+         const unsigned shown=sequence.state==PAGANI_PANEL_ON && !sequence.seq?1:0;
+         if (shown!=appliedPower) {appliedPower=shown;changed=true;}
+-        if (!rc && shown && (first || stale || goal!=level)) {
+-            rc=dsi_panel_command(&io,0x51,goal);
+-            if (!rc) {level=goal;first=false;stale=false;changed=true;__atomic_add_fetch(&commands,1,__ATOMIC_RELAXED);}
+-            observe("DSI brightness",rc,goal);
++        const uint32_t next=pagani_brightness_level(&bright,now);
++        const bool stepped=!rc && shown && (stale || next!=bright.shown);
++        if (stepped) {
++            rc=sendLevel(&io,next);
++            if (!rc) {stale=false;changed=pagani_brightness_done(&bright);}
+         }
+-        if (rc) {
+-            __atomic_store_n(&failed,true,__ATOMIC_RELEASE);setProperty("PanelError",(uint32_t)rc,32);
+-            char line[96];
+-            snprintf(line,sizeof line,"panel: DSI failed %d at packet %u of the %s sequence; requests disabled",rc,sequence.next,
+-                     !sequence.seq?"brightness":sequence.seq==pagani_panel_wake?"wake":sequence.seq==pagani_panel_off?"off":"on");
+-            boot_progress_trace(line);
+-            IOLog("Pagani panel command failed: %d; requests disabled\n",rc);return;
+-        }
++        if (!settle(rc,sequence.seq==pagani_panel_wake?"the wake":sequence.seq==pagani_panel_off?"the off sequence":"a brightness")) return;
+         if (changed) publish();
+-        uint32_t ms=16;
+-        if (wait) {const uint64_t w=(wait+999999)/1000000;if (w<ms) ms=w?(uint32_t)w:1;}
+-        timer->setTimeoutMS(ms);
++        uint32_t ms=0;
++        if (sequence.seq || wait) {const uint64_t w=(wait+999999)/1000000;ms=w && w<PAGANI_BRIGHTNESS_STEP_MS?(uint32_t)w:PAGANI_BRIGHTNESS_STEP_MS;}
++        else if (shown && !pagani_brightness_done(&bright)) ms=PAGANI_BRIGHTNESS_STEP_MS;
++        if (ms) timer->setTimeoutMS(ms);
+     }
+     void publish() {
+         auto b=OSDictionary::withCapacity(3),p=OSDictionary::withCapacity(1);
+-        auto lo=OSNumber::withNumber(0ULL,32),hi=OSNumber::withNumber(PAGANI_BRIGHTNESS_MAX,32),v=OSNumber::withNumber(level,32);
++        auto lo=OSNumber::withNumber(0ULL,32),hi=OSNumber::withNumber(PAGANI_BRIGHTNESS_MAX,32),v=OSNumber::withNumber(bright.shown,32);
+         if (b && p && lo && hi && v) {
+             b->setObject("min",lo);b->setObject("max",hi);b->setObject("value",v);
+             p->setObject("brightness",b);setProperty("IODisplayParameters",p);
+         }
+         OSSafeReleaseNULL(lo);OSSafeReleaseNULL(hi);OSSafeReleaseNULL(v);OSSafeReleaseNULL(b);OSSafeReleaseNULL(p);
+-        setProperty("brightness",level,32);setProperty("PanelDisplayOn",appliedPower!=0);
++        setProperty("brightness",bright.shown,32);setProperty("PanelDisplayOn",appliedPower!=0);
+         if (sleepMode) setProperty("PanelAsleep",sequence.state==PAGANI_PANEL_ASLEEP);
+     }
+     static void tick(OSObject *owner,IOTimerEventSource *) {
+         auto self=static_cast<PaganiPanel *>(owner);
+         if (!__atomic_load_n(&self->running,__ATOMIC_ACQUIRE) || __atomic_load_n(&self->failed,__ATOMIC_ACQUIRE)) return;
+-        if (self->sleepMode) {self->tickSequenced();return;}
++        const uint64_t now=nowNs();
++        self->takeRequest(now);
++        if (self->sleepMode) {self->tickSequenced(now);return;}
+         const unsigned power=__atomic_load_n(&requestedPower,__ATOMIC_ACQUIRE);
+-        const unsigned goal=__atomic_load_n(&self->requestedLevel,__ATOMIC_ACQUIRE);
+         auto io=self->dsi.io();int rc=0;bool changed=false;
+         if (power!=self->appliedPower) {
+-            rc=dsi_panel_command(&io,power?0x29:0x28,0);
++            rc=dsi_panel_command_mode(&io,power?0x29:0x28,0,self->sendMode);
+             if (!rc) {self->appliedPower=power;changed=true;__atomic_add_fetch(&self->commands,1,__ATOMIC_RELAXED);}
+             self->observe("DSI power",rc,power);
+         }
+-        if (!rc && (self->first || (power && goal!=self->level))) {
+-            rc=dsi_panel_command(&io,0x51,goal);
+-            if (!rc) {self->level=goal;self->first=false;changed=true;__atomic_add_fetch(&self->commands,1,__ATOMIC_RELAXED);}
+-            self->observe("DSI brightness",rc,goal);
++        const uint32_t next=pagani_brightness_level(&self->bright,now);
++        if (!rc && power && next!=self->bright.shown) {
++            rc=self->sendLevel(&io,next);
++            if (!rc) changed=changed || pagani_brightness_done(&self->bright);
+         }
+-        if (rc) {
+-            __atomic_store_n(&self->failed,true,__ATOMIC_RELEASE);self->setProperty("PanelError",(uint32_t)rc,32);
+-            IOLog("Pagani panel command failed: %d; requests disabled\n",rc);return;
+-        }
++        if (!self->settle(rc,"a brightness or display power command")) return;
+         if (changed) self->publish();
+-        self->timer->setTimeoutMS(16);
++        if (power && !pagani_brightness_done(&self->bright)) self->timer->setTimeoutMS(PAGANI_BRIGHTNESS_STEP_MS);
+     }
++    // The early records are long out of the events ring by the time anyone reads the log: the controller once more and the counters,
++    // once a minute for half an hour, also on a service that stayed unpublished.
++    static void report(OSObject *owner,IOTimerEventSource *sender) {
++        auto self=static_cast<PaganiPanel *>(owner);
++        if (!self->reports) self->logState("report");
++        self->logCounters();
++        if (++self->reports<PANEL_REPORTS) sender->setTimeoutMS(PANEL_REPORT_MS);
++    }
+     void cleanup() {
+         __atomic_store_n(&running,false,__ATOMIC_RELEASE);
++        __atomic_store_n(&panelTimer,(IOTimerEventSource *)nullptr,__ATOMIC_RELEASE);
+         if (timer) {timer->cancelTimeout();if (added) loop->removeEventSource(timer);}
+-        added=false;OSSafeReleaseNULL(timer);OSSafeReleaseNULL(loop);dsi.release();
++        if (reporter) {reporter->cancelTimeout();if (added) loop->removeEventSource(reporter);}
++        added=false;OSSafeReleaseNULL(timer);OSSafeReleaseNULL(reporter);OSSafeReleaseNULL(loop);dsi.release();
+     }
++    // The first DCS: the level the boot loader set again, so nothing changes on the panel, to learn whether the command path answers
++    // before the system is told there is a backlight. Not sent as the checks stand (they read other than on the sibling boards, or the
++    // engine stayed busy): once more without them, and the commands after it the same way when that worked.
++    int qualify() {
++        auto io=dsi.io();
++        int rc=sendLevel(&io,bright.shown);
++        if (rc==-19 || rc==-16) {
++            logState("forced");
++            sendMode|=DSI_PANEL_FORCE;
++            rc=sendLevel(&io,bright.shown);
++            if (rc) sendMode&=~DSI_PANEL_FORCE;
++        }
++        lastError=rc;
++        return rc;
++    }
+ public:
+     // The original constructor supplies storage and ancestry; no Apple hardware lifecycle is called.
+     bool init(OSDictionary *properties=nullptr) override {return IOService::init(properties);}
+@@ -138,37 +220,54 @@
+         if (!dsi.map(PAGANI_DSI_BASE,0x1000)) {
+             observe("DSI map",kIOReturnNoMemory,0);cleanup();IOService::stop(provider);return false;
+         }
+-        uint32_t control=PeripheralWindow::read(&dsi,4);
+-        if (!(control&1)) {
+-            observe("DSI disabled",kIOReturnNotReady,control);
+-            cleanup();IOService::stop(provider);return false;
+-        }
++        logState("start");
++        pagani_brightness_init(&bright,PAGANI_BRIGHTNESS_DEFAULT);
++        unsigned options=0;PE_parse_boot_argn("pagani-panel",&options,sizeof options);
++        if (options&PANEL_OPTION_LP) sendMode|=DSI_PANEL_LP;
+         loop=IOWorkLoop::workLoop();timer=IOTimerEventSource::timerEventSource(this,tick);
+-        added=loop && timer && loop->addEventSource(timer)==kIOReturnSuccess;
++        reporter=IOTimerEventSource::timerEventSource(this,report);
++        added=loop && timer && reporter && loop->addEventSource(timer)==kIOReturnSuccess && loop->addEventSource(reporter)==kIOReturnSuccess;
+         if (!added) {observe("timer",kIOReturnNoResources,0);cleanup();IOService::stop(provider);return false;}
+         // pagani-screenoff bit 2: display off also enters sleep mode, display on leaves it with the vendor's writes (PanelPower.h).
+         unsigned screenoff=0;PE_parse_boot_argn("pagani-screenoff",&screenoff,sizeof screenoff);
+         sleepMode=(screenoff&4u)!=0;pagani_panel_power_init(&sequence,sleepMode);
+         if (sleepMode) setProperty("PanelSleepMode",true);
+-        __atomic_store_n(&running,true,__ATOMIC_RELEASE);tick(this,nullptr);
+-        if (__atomic_load_n(&failed,__ATOMIC_ACQUIRE)) {cleanup();IOService::stop(provider);return false;}
++        const int rc=qualify();
++        logState(rc?"no dcs":"dcs ok");logCounters();
++        reporter->setTimeoutMS(PANEL_REPORT_FIRST_MS);
++        if (rc && !(options&PANEL_OPTION_PUBLISH_ALWAYS)) {
++            // The system runs without a backlight, as it does without this driver: the screen keeps the boot loader's level. The service
++            // stays, never registered (no class match, nothing for CoreBrightness), for its reports: the first read of a controller
++            // that refuses must reach the log.
++            observe(rc==-19?"DSI disabled":"DSI no answer",rc,0);
++            setProperty("PanelError",(uint32_t)rc,32);
++            __atomic_store_n(&failed,true,__ATOMIC_RELEASE);
++            return true;
++        }
++        // Before anything can look: CoreBrightness refuses a display without IODisplayParameters, and QuartzCore waits for the libEDR
++        // server CoreBrightness starts while opening that display as soon as backlight-control makes CADeviceHasBacklight true.
++        publish();
++        // backboardd's profile refuses FadePeriod, which CoreBrightness sends with every brightness (sheng int-276).
++        setProperty("NativeSandboxGrantProcess","backboardd");
+         // Publish only with real AppleARMBacklight ancestry: CoreBrightness uses IOObjectConformsTo.
+         setProperty("backlight-control",true);setProperty("Built-In",true);
+         setProperty("PanelMaxBrightness",PAGANI_BRIGHTNESS_MAX,32);
+         setProperty("PanelRefreshSource","firmware timing; software presentation at 60 Hz");
++        __atomic_store_n(&running,true,__ATOMIC_RELEASE);
++        __atomic_store_n(&panelTimer,timer,__ATOMIC_RELEASE);
+         registerService();return true;
+     }
+     IOReturn setProperties(OSObject *properties) override {
+         auto dict=OSDynamicCast(OSDictionary,properties);
+         if (!dict) return kIOReturnBadArgument;
+-        auto raw=dict->getObject("brightness");
+-        if (!raw) return kIOReturnSuccess;
+-        auto value=OSDynamicCast(OSNumber,raw);
+-        if (!value || value->unsigned64BitValue()>PAGANI_BRIGHTNESS_MAX) return kIOReturnBadArgument;
+-        if (!__atomic_load_n(&running,__ATOMIC_ACQUIRE) || __atomic_load_n(&failed,__ATOMIC_ACQUIRE)) return kIOReturnNotReady;
+-        // shortcut: apply the target without FadePeriod interpolation; add fades after transport qualification.
+-        __atomic_store_n(&requestedLevel,value->unsigned32BitValue(),__ATOMIC_RELEASE);
+-        observe("brightness request",0,value->unsigned32BitValue());
++        auto value=OSDynamicCast(OSNumber,dict->getObject("brightness"));
++        if (!value) return kIOReturnSuccess;
++        auto fade=OSDynamicCast(OSNumber,dict->getObject("FadePeriod"));
++        __atomic_add_fetch(&requests,1,__ATOMIC_RELAXED);
++        // Handed to the work loop without waiting for it: the caller is CoreBrightness's brightness thread (sheng int-277). A later
++        // request replaces one not yet taken. The timer carries it (sheng int-278: an interrupt source signalled here wrote nothing).
++        __atomic_store_n(&request,pagani_brightness_request(value->unsigned64BitValue(),fade?fade->unsigned32BitValue():0,PAGANI_BRIGHTNESS_MAX),__ATOMIC_RELEASE);
++        if (__atomic_load_n(&running,__ATOMIC_ACQUIRE) && !__atomic_load_n(&failed,__ATOMIC_ACQUIRE)) timer->setTimeoutUS(1);
+         return kIOReturnSuccess;
+     }
+     void stop(IOService *provider) override {cleanup();IOService::stop(provider);}

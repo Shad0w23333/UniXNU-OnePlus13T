@@ -1,0 +1,59 @@
+--- a/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/Test/check-pagani-adsp-host.py	2026-10-30 17:42:14
++++ b/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/Test/check-pagani-adsp-host.py	2026-10-31 09:34:00
+@@ -5,6 +5,7 @@
+ 
+   cores     MDT parsing, SMEM partitions/items and the 13T access guard, SMP2P, GLINK (ported from UniXNU-sheng)
+   qrtr      the IPC router, the service locator answer bytes and the SM8750 domain table
++  clients   the IPC router client ports (PaganiAdsp.h) and the router hooks under them, the locator's crash report answer
+   firmware  modem_a as FAT16 (4096-byte sectors) and FAT32 (512-byte sectors) volumes made by mtools, holding synthetic
+             NAME.mdt/NAME.bNN images; the carveout and metadata each must give are computed here, independently
+   platform  the PAS/QMP/RPMh adapters over the Adreno830 SM8750 platform layer (its own sources, MIT), against models
+@@ -271,6 +272,7 @@
+         tests = {
+             'cores': lambda: check_output(build(out, 'cores', [HERE / 'cores.c'] + [DRIVER / s for s in CORES[:3] + ['QcomMdt.c']])),
+             'qrtr': lambda: check_output(build(out, 'qrtr', [HERE / 'qrtr.c'] + [DRIVER / s for s in PORTABLE])),
++            'clients': lambda: check_output(build(out, 'qrtr_client', [HERE / 'qrtr_client.c'] + [DRIVER / s for s in PORTABLE])),
+             'firmware': lambda: test_firmware(out, tmp),
+             'platform': lambda: check_output(build(out, 'platform', [HERE / 'platform.c', DRIVER / 'AdspPlatform.c'] + platform(args),
+                                                    ['-I', str(args.adreno830 / 'platform/sm8750')])),
+--- a/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/scripts/build-pagani-adsp.py	2026-10-30 17:34:18
++++ b/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/scripts/build-pagani-adsp.py	2026-10-31 09:34:00
+@@ -32,7 +32,8 @@
+             '-Wno-deprecated-enum-enum-conversion', '-Wno-unnecessary-virtual-specifier', '-Wno-sign-conversion',
+             '-Wno-shorten-64-to-32']
+ REQUIRED = ['_pagani_adsp_start', '_pagani_adsp_channel', '_pagani_adsp_channel_config', '_pagani_adsp_send',
+-            '_pagani_adsp_channel_up', '_pagani_adsp_status']
++            '_pagani_adsp_channel_up', '_pagani_adsp_status', '_pagani_adsp_qrtr_open', '_pagani_adsp_qrtr_port_number',
++            '_pagani_adsp_qrtr_server', '_pagani_adsp_qrtr_lookup', '_pagani_adsp_qrtr_send', '_pagani_adsp_qrtr_close']
+ # Defaults for providers a kernel may lack (BootProgress, NativeUfs before the partition access, PaganiArmCpu) and the shared lock
+ # words (AdspPlatform.h): weak, so the real ones or the other users' copies win.
+ WEAK = ['_boot_progress_trace', '_native_ufs_part_find', '_native_ufs_part_read', '_native_ufs_part_status', '_armcpu_spi_attach',
+--- a/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/README.md	2026-10-30 17:38:58
++++ b/UniXNU-Pagani-Drivers/drivers/PaganiAdsp/README.md	2026-10-31 09:34:00
+@@ -33,8 +33,9 @@
+ Run time: the thread serves SMP2P (feature negotiation, restart ack, handover, a fatal error report), GLINK and the IPC router. The router
+ says hello, announces the service locator (service 0x40, port 1) and answers the protection domains' queries from the SM8550/SM8750
+ table: `avs/audio` → `msm/adsp/audio_pd`, and the root, charger and sensor PDs (instance 74), CDSP (76), modem (180, `gps/gps_service`);
+-every domain provides `tms/servreg`. A fatal error of the running DSP reads the crash reason, closes every channel and refuses later
+-sends; there is no restart.
++every domain provides `tms/servreg`. A protection domain's crash report to the locator (`SERVREG_LOC_PFR_REQ`, 0x24) is answered
++with success, logged (`[adsp] pd crash report <service> reason=...`, the first eight) and named in the status note. A fatal error of
++the running DSP reads the crash reason, closes every channel and refuses later sends; there is no restart.
+ 
+ ## Boot arguments
+ 
+@@ -54,6 +55,14 @@
+ PaganiAdsp defines `PAGANI_ADSP_WEAK_DEFAULTS` in one file before including the header. `pagani_adsp_status()` returns the stage, the
+ error, the SMP2P bits, GLINK and IPC router counters and the crash note.
+ 
++IPC router clients (QMI clients of a DSP service, e.g. PaganiSensors for the sensor client service 400): `pagani_adsp_qrtr_open()`
++opens a port of our node (from 0x4000, not announced; with `announce_service` also our server of a service, announced after each
++hello of the DSP) that follows the DSP's server of one service (any instance, or one); `pagani_adsp_qrtr_server()` reads that server
++(level, with a generation that moves on every change), the `server` callback is the edge (also for DEL_SERVER, BYE and the link going
++down); `pagani_adsp_qrtr_send()` queues one data message of at most 480 bytes (the IPCRTR channel's 512-byte messages) from any
++thread, also from inside a callback; `pagani_adsp_qrtr_close()` sends DEL_CLIENT. Twelve ports at a time. Callbacks run on the DSP
++thread with no PaganiAdsp lock held. `Test/qrtr_client.c` (`clients`) checks it against the real channel queue.
++
+ ## Sharing with the A830 GPU driver
+ 
+ The SCM, AOSS QMP and RPMh calls go through the Adreno830 SM8750 platform layer (linked from `libAdreno830.a`, not compiled again).

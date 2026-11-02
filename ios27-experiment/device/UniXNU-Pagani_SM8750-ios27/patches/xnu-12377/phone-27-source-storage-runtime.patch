@@ -1,0 +1,41 @@
+phone-27-source-storage-runtime.patch（从 sheng 移植并改写）
+
+来源：UniXNU-sheng patches/xnu-12377/source-storage-runtime.patch（快照提交 6b11bb5）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+
+类别：板无关。24A446 的存储走 fileset 内核集合：原版 IOStorageFamily 和 APFS 留在集合里，只有
+IOBlockStorageDevice 的实现从源码编进来，metaclass 在 IOKit 启动后才注册（见上游 scripts/build-sheng-source-storage.py）。
+这个钩子就是注册的入口。13T 的 NativeUfs 到 27 上要走同样的路。
+
+与 sheng 的区别：sheng 用 weak_import 加判空。上游脚本注释写明内核链接不能留未定义的弱导入，
+而 13T 还没有 native_source_storage_start 的实现，照抄会链接失败。这里改成 bsd_init.c 里的弱定义空函数，
+以后组件给出强定义时自动覆盖。
+
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 8850e65..ef7daea 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -568,6 +568,13 @@ native_mobile_graphics_load_probe(void)
+ }
+ #endif
+ 
++/* 13T：弱定义的空实现，没有 27 版存储运行时的时候内核也能链接；组件里的强定义会覆盖它。 */
++__attribute__((weak)) void native_source_storage_start(void);
++__attribute__((weak)) void
++native_source_storage_start(void)
++{
++}
++
+ void
+ bsd_init(void)
+ {
+@@ -795,6 +802,9 @@ bsd_init(void)
+ 	/* Initialize the file systems. */
+ 	bsd_init_kprintf("calling vfsinit\n");
+ 	vfsinit();
++	/* Optional source storage runtime registers after the IOKit bootstrap. */
++	extern void native_source_storage_start(void);
++	native_source_storage_start();
+ #if DEVELOPMENT || DEBUG
+ 	native_apfs_load_probe();
+ 	native_mobile_graphics_load_probe();

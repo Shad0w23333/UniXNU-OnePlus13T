@@ -1,0 +1,56 @@
+--- a/工具/make-phone-seed.py
++++ b/工具/make-phone-seed.py
+@@ -1,8 +1,9 @@
+ #!/usr/bin/env python3
+ """Derive the Data seed of the iPhone-layout images from a GPU Data seed (a DBRDISK1 packed APFS container, add-gpu-plugin-data.py output).
+ 
+-  make-phone-seed.py [--gib N] [--disable-jobs LABEL,...] [--wallpaper DIR] [--keyboard FILE] [--keyboard-prefs] [--migrate]
+-                     [--force-install-apps] [--diag-daemon DIR] [--controlcenter DIR] BASE.dbrdisk OUTPUT.dbrdisk
++  make-phone-seed.py [--gib N] [--disable-jobs LABEL,...] [--wallpaper DIR] [--keyboard FILE] [--keyboard-prefs]
++                     [--keep-inline-completions] [--migrate] [--force-install-apps] [--diag-daemon DIR] [--controlcenter DIR]
++                     BASE.dbrdisk OUTPUT.dbrdisk
+ 
+ --gib N            grow the APFS container to N GiB (default 2; at most 2). The 13T keeps Data in a volatile RAM disk: NativeRamBlock serves
+                    a packed seed of at most 2 GiB from RAM, allocating a 4 KiB page only when it is first written (a 4 MiB page table for
+@@ -28,6 +29,15 @@
+                    keys queue behind) and com.apple.keyboard.ContinuousPath KeyboardContinuousPathEnabled = false (Settings' "Slide
+                    to Type" off: no touch left in the continuous-path state that drops every later touch-down). The keyboard drew
+                    right under the iPhone identity but no key typed (2026-10-30); slightly weaker autocorrection, no slide typing.
++                   Also com.apple.keyboard.preferences KeyboardInlineCompletion = false (Settings > General > Keyboard > "Show
++                   Predictions Inline" off, sysfix/keyboard/NOTES.md): kbd generates inline completions (a beam search of up to 32
++                   forward passes of the English transformer language model) inside every autocorrection request, and UIKit's
++                   keyboard task queue waits for that request (-[UIKeyboardAutocorrectionController setNeedsAutocorrection]
++                   defers a task that holds the queue until kbd answers), so the next key waits too; the iPhone runs the model on
++                   its Neural Engine, the 13T on the CPU (unilm_joint_cpu, int8; MobileGestalt has no AppleNeuralEngineSubtype
++                   without an ane-type property). Predictions, autocorrection and the QuickType bar stay; the user can turn the
++                   setting back on.
++--keep-inline-completions  (with --keyboard-prefs) leave KeyboardInlineCompletion alone (inline completions on, the iOS default).
+ --migrate          create the DataMigrator sentinel /private/var/datamigrator/migrate (DMMigrationSentinelManager): with it
+                    DMIsMigrationNeeded() is true although LastSystemVersion is 21H461, so the boot runs the data migration, whose
+                    SystemAppMigrator (its third plugin) installs the deletable system apps that the kernel copied into
+@@ -102,6 +112,7 @@
+     'com.apple.reminders', 'com.apple.Translate', 'com.apple.shortcuts', 'com.apple.stocks', 'com.apple.tips',
+     'com.apple.VoiceMemos', 'com.apple.weather')
+ KEYBOARD_FIXES = ('com.apple.keyboard:KeyboardDisableHitTesting=true', 'com.apple.keyboard.ContinuousPath:KeyboardContinuousPathEnabled=false')
++KEYBOARD_INLINE_OFF = 'com.apple.keyboard.preferences:KeyboardInlineCompletion=false'   # --keyboard-prefs unless --keep-inline-completions
+ # PaganiDiag (--diag-daemon): the daemon, its optional configuration, the logging preference and the (unused on 21H461) launchd job.
+ DIAG_FILES = (('paganidiag', 'ngpu/bin/paganidiag', 0o755), ('paganidiag.conf', 'ngpu/bin/paganidiag.conf', 0o644),
+               ('com.apple.migration.plist', 'preferences/Logging/Subsystems/com.apple.migration.plist', 0o644),
+@@ -278,6 +289,7 @@
+     parser.add_argument('--wallpaper', type=Path)
+     parser.add_argument('--keyboard', type=Path)
+     parser.add_argument('--keyboard-prefs', action='store_true')
++    parser.add_argument('--keep-inline-completions', action='store_true')
+     parser.add_argument('--migrate', action='store_true')
+     parser.add_argument('--force-install-apps', action='store_true')
+     parser.add_argument('--diag-daemon', type=Path)
+@@ -352,7 +364,8 @@
+                     sys.exit('--controlcenter: /private/var/%s/%s reads back different' % (CONTROLCENTER, CONTROLCENTER_FILE))
+                 report['controlcenter'] = '/private/var/' + CONTROLCENTER
+             if args.keyboard_prefs:
+-                prefs = subprocess.run([sys.executable, '-B', str(KEYBOARD_PREFS), str(mount / 'mobile/Library/Preferences'), *KEYBOARD_FIXES],
++                fixes = KEYBOARD_FIXES + (() if args.keep_inline_completions else (KEYBOARD_INLINE_OFF,))
++                prefs = subprocess.run([sys.executable, '-B', str(KEYBOARD_PREFS), str(mount / 'mobile/Library/Preferences'), *fixes],
+                                        capture_output=True, text=True)
+                 if prefs.returncode:
+                     sys.exit('keyboard-prefs.py failed: ' + prefs.stderr.strip())

@@ -1,0 +1,18 @@
+--- a/UniXNU/components.toml
++++ b/UniXNU/components.toml
+@@ -940,11 +940,11 @@
+ path = "drivers/PaganiSensors"
+ hardware = ["OnePlus 13T PKX110", "SM8750"]
+ os_abi = ["ipados-17.7.11-21H461"]
+-board_dependencies = ["Stage7Probe calls pagani_sensors_start after pagani_adsp_start", "pagani-sensors=1/2/3 (absent: off); 2 and 3 need pagani-adsp=1", "the ADSP sensor PD's registry (FastRPC file service, not provided yet) for physical sensors"]
++board_dependencies = ["Stage7Probe calls pagani_sensors_start after pagani_adsp_start", "pagani-sensors=1/2/3 (absent: off), +4 the FastRPC file service, +8 the orientation service; 2, 3 and +4 need pagani-adsp=1", "the sensor PD's file pack in the Data seed (make-sensor-pack.py, make-phone-seed.py --sensor-pack) for physical sensors", "the XNU patch zzwc-native-adreno-sandbox-grant-all (NativeSandboxGrantAll) for the orientation service's user client"]
+ verified_devices = []
+-dependencies = ["Adreno830", "PaganiAdsp", "PaganiInput", "NativeMobileDisplay", "Stage7Probe", "BootProgress"]
+-source_files = ["PaganiSensors.cpp", "PaganiSensorsHid.cpp", "SensorsCore.c", "SensorsSsc.c", "SensorsPb.c", "SensorsFixed.c", "SensorsHid.c"]
+-runtime_identifiers = ["PaganiSensorHid", "pagani_sensors_start", "pagani_sensors_status"]
++dependencies = ["Adreno830", "PaganiAdsp", "PaganiInput", "NativeMobileDisplay", "Sm8750Platform", "Stage7Probe", "BootProgress"]
++source_files = ["PaganiSensors.cpp", "PaganiSensorsHid.cpp", "PaganiSensorsRpc.cpp", "SensorsCore.c", "SensorsSsc.c", "SensorsPb.c", "SensorsFixed.c", "SensorsHid.c", "SensorsOrient.c", "SensorsPack.c", "SensorsRpc.c"]
++runtime_identifiers = ["PaganiSensorHid", "PaganiSensorSpuClient", "pagani_sensors_start", "pagani_sensors_status", "pagani_sensors_rpc_start"]
+ build_stage = "kernel"
+ build = ["{component}/scripts/build-pagani-sensors.py", "--kernelcache", "{out}/../../../ipsw/21H461/kernelcache.decompressed", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+ outputs = ["build/pagani-sensors/libPaganiSensors.a"]

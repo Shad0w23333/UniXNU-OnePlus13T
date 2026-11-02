@@ -1,0 +1,15 @@
+--- a/UniXNU-Pagani_SM8750-gpu/board.toml
++++ b/UniXNU-Pagani_SM8750-gpu/board.toml
+@@ -172,6 +172,12 @@
+ [adt.product.u32]
+ thin-bezel = 1
+ 
++# Wi-Fi, second step (PaganiWifi pagani-wifi=6 only): launchd starts wifid only when the device tree has a node named "wlan"
++# (_LimitLoadToDeviceTree: IODTFindMatchingEntries by name, at any level, build-userspace/a830-inputs/inventory/ios.md 1.1). A
++# name-only child of /product, like accel/gyro: no nub, no driver matches it. Apply together with pagani-wifi=6 and after the first
++# image has shown en0 up (wifid against no interface is untested); /chosen/mac-address-wifi0 is written by the driver at run time.
++[adt.product.wlan]
++
+ [adt.buttons.string]
+ compatible = "buttons"
+ device_type = "buttons"

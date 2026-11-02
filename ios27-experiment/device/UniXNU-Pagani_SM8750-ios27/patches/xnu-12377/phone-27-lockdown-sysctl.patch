@@ -1,0 +1,36 @@
+phone-27-lockdown-sysctl.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 16 块（lockdown_mode.c）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，27 必需。
+作用：补 security.mac.lockdown_mode_state_public。Darwin 26 的 os_lockdown_mode_enabled 查不到这个名字就 abort。
+
+diff --git a/bsd/kern/lockdown_mode.c b/bsd/kern/lockdown_mode.c
+index 1c104b3..324460f 100644
+--- a/bsd/kern/lockdown_mode.c
++++ b/bsd/kern/lockdown_mode.c
+@@ -83,6 +83,22 @@ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, lockdown_mode_init_async);
+ STARTUP(EARLY_BOOT, STARTUP_RANK_LAST, lockdown_mode_init);
+ #endif
+ 
++int get_lockdown_mode_state(void);
++
++/*
++ * Darwin 26 libsystem reads Lockdown Mode through this name (os_lockdown_mode_enabled aborts when the
++ * lookup fails). It reports the same state once lockdown_mode_init has run.
++ */
++static int
++sysctl_lockdown_mode_state_public SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	int state = get_lockdown_mode_state();
++	return SYSCTL_OUT(req, &state, sizeof(state));
++}
++SYSCTL_PROC(_security_mac, OID_AUTO, lockdown_mode_state_public, CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_LOCKED,
++    0, 0, sysctl_lockdown_mode_state_public, "I", "Lockdown Mode state");
++
+ int
+ get_lockdown_mode_state(void)
+ {

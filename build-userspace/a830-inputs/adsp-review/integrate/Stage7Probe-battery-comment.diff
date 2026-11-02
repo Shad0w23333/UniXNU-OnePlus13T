@@ -1,0 +1,11 @@
+--- a/UniXNU-Pagani-Drivers/drivers/Stage7Probe/Stage7Probe.cpp
++++ b/UniXNU-Pagani-Drivers/drivers/Stage7Probe/Stage7Probe.cpp
+@@ -37,7 +37,7 @@
+ // starts its own kernel thread (pagani-adsp=1) and returns at once.
+ extern "C" __attribute__((weak)) void pagani_adsp_start(void) {}
+ // The battery power source (drivers/PaganiBattery, appended to the Adreno830 archive) replaces this default the same way. It reads
+-// its own boot arguments (pagani-battery, else pagani-adsp) and returns at once without them, so it is called unconditionally.
++// its own boot argument (pagani-battery=1; pagani-adsp=1 does not imply it) and returns at once without it, so it is called unconditionally.
+ extern "C" __attribute__((weak)) void pagani_battery_start(void) {}
+ // The audio service (drivers/PaganiAudio, component PaganiAudio) replaces this default the same way. It reads its own boot argument
+ // pagani-audio and returns at once without it, so it is called unconditionally.

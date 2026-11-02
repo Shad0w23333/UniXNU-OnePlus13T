@@ -1,0 +1,273 @@
+Upstream Mesa fixes that apply to the Adreno 830 (chip 0x44050001: a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen1), backported onto the
+pinned 85fda3b after turnip-a8xx-backports.patch:
+  99fed09b tu: Add missing WFI to tu6_clear_lrz() (Cc: mesa-stable)
+  189ee824 ir3: add quirk for prefetch sam.s2en needing helpers (a7xx_base; the A830 keeps FS texture prefetch on)
+  84f09016 ir3: Don't use alias.tex inside predt/predf/prede sequence (QCTDD11183148, a7xx_base; main leaves it on for a8xx_base),
+           without its parent 963e3551 (the alias.tex/mova quirk, which main turns off for a8xx_base): alias_srcs() keeps its pinned form
+  c503b0a1 freedreno/ir3: Implement QCTDD13523866 quirk (a7xx_gen3)
+  a08a0b93 ir3: fix QCTDD13523866 workaround (with main's foreach_block_from/foreach_main_block iterators)
+85fda3b has no quirks section (a3c6dff6 came later), so the three quirks are props fields like every other pinned quirk:
+alias_predication_quirk, prefetch_sam_helpers_quirk and QCTDD13523866_dummy_alu (FD_DEV_FEATURES=<name>=0 turns one off).
+
+diff --git a/src/freedreno/common/freedreno_dev_info.h b/src/freedreno/common/freedreno_dev_info.h
+index 4302b8a..bfc3d1a 100644
+--- a/src/freedreno/common/freedreno_dev_info.h
++++ b/src/freedreno/common/freedreno_dev_info.h
+@@ -488,6 +488,23 @@ struct fd_dev_info {
+ 
+       uint32_t max_texel_buffer_range_elements;
+       uint32_t max_storage_buffer_range_bytes;
++
++      /* On some HW alias.tex may hang when predicated (i.e. between
++       * predt/predf and prede).
++       */
++      bool alias_predication_quirk;
++
++      /* There seems to be a HW bug where a dummy prefetch sam.s2en always
++       * reads its src2 from fiber 0. This may cause faults when fiber 0 is a
++       * helper and helpers are disabled. We work around this by keeping
++       * helpers enabled until after such sam.s2en.
++       */
++      bool prefetch_sam_helpers_quirk;
++
++      /* QCTDD13523866: when there is a main shader with single ALU
++       * instruction which has CONST access, insert dummy ALU.
++       */
++      bool QCTDD13523866_dummy_alu;
+    } props;
+ };
+ 
+diff --git a/src/freedreno/common/freedreno_devices.py b/src/freedreno/common/freedreno_devices.py
+index f74587c..bf6ef13 100644
+--- a/src/freedreno/common/freedreno_devices.py
++++ b/src/freedreno/common/freedreno_devices.py
+@@ -804,6 +804,9 @@ a7xx_base = GPUProps(
+         round_robin_errata = True,
+         max_texel_buffer_range_elements = 1 << 27,
+         max_storage_buffer_range_bytes = 1 << 27,
++
++        alias_predication_quirk = True,
++        prefetch_sam_helpers_quirk = True,
+     )
+ 
+ a7xx_gen1 = GPUProps(
+@@ -862,6 +865,8 @@ a7xx_gen3 = GPUProps(
+         max_draw_states = 64,
+         has_64b_image_atomics = True,
+         has_implicit_fragface_fragcoord_ij_linear = True,
++
++        QCTDD13523866_dummy_alu = True,
+     )
+ 
+ a730_magic_regs = dict(
+diff --git a/src/freedreno/ir3/ir3.h b/src/freedreno/ir3/ir3.h
+index 8d6170f..5acc673 100644
+--- a/src/freedreno/ir3/ir3.h
++++ b/src/freedreno/ir3/ir3.h
+@@ -1193,6 +1193,12 @@ is_alu(struct ir3_instruction *instr)
+    return (1 <= opc_cat(instr->opc)) && (opc_cat(instr->opc) <= 3);
+ }
+ 
++static inline bool
++is_mov(struct ir3_instruction *instr)
++{
++   return opc_cat(instr->opc) == 1;
++}
++
+ static inline bool
+ is_sfu(struct ir3_instruction *instr)
+ {
+@@ -2062,6 +2068,10 @@ __ssa_srcp_n(struct ir3_instruction *instr, unsigned n)
+    list_for_each_entry_safe (struct ir3_block, __block, __list, node)
+ #define foreach_block_rev(__block, __list)                                     \
+    list_for_each_entry_rev (struct ir3_block, __block, __list, node)
++#define foreach_block_from(__block, __list, __start)                           \
++   list_for_each_entry_from (struct ir3_block, __block, __start, __list, node)
++#define foreach_main_block(__block, __ir)                                      \
++   foreach_block_from (__block, &__ir->block_list, ir3_after_preamble(__ir))
+ 
+ /* iterators for arrays: */
+ #define foreach_array(__array, __list)                                         \
+@@ -3417,4 +3427,7 @@ unsigned ir3_required_delay(struct ir3_legalize_state *state,
+                             struct ir3_compiler *compiler,
+                             struct ir3_instruction *instr);
+ 
++bool ir3_prefetch_sam_needs_helpers(struct ir3_compiler *compiler,
++                                    struct ir3_instruction *sam);
++
+ #endif /* IR3_H_ */
+diff --git a/src/freedreno/ir3/ir3_alias.c b/src/freedreno/ir3/ir3_alias.c
+index 12d6560..75f3ac0 100644
+--- a/src/freedreno/ir3/ir3_alias.c
++++ b/src/freedreno/ir3/ir3_alias.c
+@@ -162,13 +162,27 @@ ir3_create_alias_tex_regs(struct ir3 *ir)
+       return false;
+ 
+    bool progress = false;
++   bool block_is_predicated = false;
+ 
+    foreach_block (block, &ir->block_list) {
+-      foreach_instr (instr, &block->instr_list) {
+-         if (supports_alias_srcs(instr)) {
+-            progress |= alias_srcs(instr);
++      /* All current HW has a limitation where alias.tex is not allowed inside a
++       * predt/predf/prede sequence.
++       */
++      if (!ir->compiler->info->props.alias_predication_quirk ||
++          !block_is_predicated) {
++         foreach_instr (instr, &block->instr_list) {
++            if (supports_alias_srcs(instr)) {
++               progress |= alias_srcs(instr);
++            }
+          }
+       }
++
++      /* If a block ends in pred[tf] then the subsequent block is predicated
++       * (inside a predt/predf/prede sequence).
++       */
++      struct ir3_instruction *terminator = ir3_block_get_terminator(block);
++      block_is_predicated = terminator &&
++         (terminator->opc == OPC_PREDT || terminator->opc == OPC_PREDF);
+    }
+ 
+    return progress;
+diff --git a/src/freedreno/ir3/ir3_compiler_nir.c b/src/freedreno/ir3/ir3_compiler_nir.c
+index a06d6f8..25cfbcb 100644
+--- a/src/freedreno/ir3/ir3_compiler_nir.c
++++ b/src/freedreno/ir3/ir3_compiler_nir.c
+@@ -3475,6 +3475,12 @@ emit_intrinsic(struct ir3_context *ctx, nir_intrinsic_instr *intr)
+ 
+       make_dst_dummy(sam);
+       array_insert(ctx->block, ctx->block->keeps, sam);
++
++      if (ctx->so->type == MESA_SHADER_FRAGMENT &&
++          ir3_prefetch_sam_needs_helpers(ctx->compiler, sam)) {
++         ctx->so->need_pixlod = true;
++      }
++
+       break;
+    }
+    case nir_intrinsic_prefetch_tex_ir3: {
+@@ -5776,6 +5782,42 @@ ir3_remove_noop_subreg_moves(struct ir3 *ir)
+    return progress;
+ }
+ 
++static void
++apply_QCTDD13523866(struct ir3_context *ctx)
++{
++   struct ir3 *ir = ctx->ir;
++   struct ir3_instruction *alu = NULL;
++
++   foreach_main_block (block, ir) {
++      foreach_instr (instr, &block->instr_list) {
++         if (is_mov(instr) || !is_alu(instr))
++            continue;
++         if (alu)
++            return;
++         alu = instr;
++      }
++   }
++
++   if (!alu)
++      return;
++
++   /* Only a single ALU instruction.. if it has a const src, we must
++    * apply the workaround:
++    */
++   foreach_src (reg, alu) {
++      if (reg->flags & IR3_REG_CONST) {
++         struct ir3_instruction *end = ir3_find_end(ir);
++         struct ir3_instruction *dummy =
++            ir3_build_instr(&ctx->build, OPC_MOV, 1, 1);
++         dummy->cat1.src_type = dummy->cat1.dst_type = TYPE_F32;
++         ir3_src_create(dummy, 0, 0);
++         ir3_dst_create(dummy, 0, 0);
++         ir3_instr_move_before(dummy, end);
++         break;
++      }
++   }
++}
++
+ int
+ ir3_compile_shader_nir(struct ir3_compiler *compiler,
+                        struct ir3_shader *shader,
+@@ -6184,6 +6226,9 @@ ir3_compile_shader_nir(struct ir3_compiler *compiler,
+    if (ctx->compiler->gen == 4 && ctx->s->info.uses_texture_gather)
+       fixup_tg4(ctx);
+ 
++   if (ctx->compiler->info->props.QCTDD13523866_dummy_alu)
++      apply_QCTDD13523866(ctx);
++
+    /* We need to do legalize after (for frag shader's) the "bary.f"
+     * offsets (inloc) have been assigned.
+     */
+diff --git a/src/freedreno/ir3/ir3_legalize.c b/src/freedreno/ir3/ir3_legalize.c
+index 02c3812..1c8d048 100644
+--- a/src/freedreno/ir3/ir3_legalize.c
++++ b/src/freedreno/ir3/ir3_legalize.c
+@@ -1621,13 +1621,25 @@ dbg_expand_rpt(struct ir3 *ir)
+    }
+ }
+ 
++bool
++ir3_prefetch_sam_needs_helpers(struct ir3_compiler *compiler,
++                               struct ir3_instruction *sam)
++{
++   assert(sam->opc == OPC_SAM);
++   assert(has_dummy_dst(sam));
++
++   return compiler->info->props.prefetch_sam_helpers_quirk &&
++          (sam->flags & IR3_INSTR_S2EN);
++}
++
+ struct ir3_mark_helpers_data {
+    bool valid;
+    regmask_t needs_helpers;
+ };
+ 
+ static void
+-instr_mark_helpers(struct ir3_mark_helpers_data *bd,
++instr_mark_helpers(struct ir3_compiler *compiler,
++                   struct ir3_mark_helpers_data *bd,
+                    struct ir3_instruction *instr)
+ {
+    if (instr->flags & IR3_INSTR_NEEDS_HELPERS) {
+@@ -1668,6 +1680,17 @@ instr_mark_helpers(struct ir3_mark_helpers_data *bd,
+    case OPC_DSXPP_1:
+    case OPC_DSYPP_1: {
+       if (instr->opc == OPC_SAM && has_dummy_dst(instr)) {
++         if (ir3_prefetch_sam_needs_helpers(compiler, instr)) {
++            /* Prefetch sam.s2en erroneously reads it src2 from fiber 0. To
++             * ensure its src2 is available even when fiber 0 is a helper, we
++             * should keep helpers enabled. We could try to track src2 here but
++             * this complicates the code below. Just mark the instruction
++             * itself. Since (eq) is illegal in the preamble it will propagate
++             * to the start of the main shader anyway.
++             */
++            instr->flags |= IR3_INSTR_NEEDS_HELPERS;
++         }
++
+          /* sam requires helper invocations except for dummy prefetch
+           * instructions.
+           */
+@@ -1776,7 +1799,7 @@ mark_helpers(struct ir3_legalize_ctx *ctx, struct ir3 *ir,
+          }
+ 
+          foreach_instr_rev (instr, &block->instr_list) {
+-            instr_mark_helpers(bd, instr);
++            instr_mark_helpers(ctx->compiler, bd, instr);
+ 
+             /* We only care about the last instruction needing helpers. */
+             if (instr->flags & IR3_INSTR_NEEDS_HELPERS) {
+diff --git a/src/freedreno/vulkan/tu_clear_blit.cc b/src/freedreno/vulkan/tu_clear_blit.cc
+index 47a2fc6..a4976bb 100644
+--- a/src/freedreno/vulkan/tu_clear_blit.cc
++++ b/src/freedreno/vulkan/tu_clear_blit.cc
+@@ -2468,6 +2468,7 @@ tu6_clear_lrz(struct tu_cmd_buffer *cmd,
+     * writing whole cache lines we assume to be 64 bytes.
+     */
+    tu_emit_event_write<CHIP>(cmd, &cmd->cs, FD_CACHE_CLEAN);
++   tu_cs_emit_wfi(cs);
+ 
+    const unsigned lrz_buffers = CHIP >= A7XX ? 2 : 1;
+    for (unsigned i = 0; i < lrz_buffers; i++) {

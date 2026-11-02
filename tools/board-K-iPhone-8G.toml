@@ -1,0 +1,157 @@
+schema_version = 2
+
+[board]
+name = "oneplus13t"
+soc = "SM8750"
+soc_source = "sm8750"
+os_profile = "ipados-17.7.11-21H461"
+description = "OnePlus 13T PKX110: Stage 7 early userspace and CPU display"
+kit = "oneplus13t"
+
+[ipsw]
+fetch = ["AppleLogo", "KernelCache", "DeviceTree", "StaticTrustCache", "Cryptex1,SystemTrustCache"]
+
+[ipsw.sha256]
+"applelogo@2732~ipad.im4p" = "de55e7b7a4eff459118f8a4ec9af79b017cfdbfec4c5b079346e414c68ff1fba"
+
+[components]
+include = ["BootProgress", "NativeAES", "NativeKeyStoreEvents", "NativeMobileDisplay", "NativeRamBlock", "NativeUfs", "NativeVirtioBlock", "PaganiArmCpu", "PaganiArmDTPlatform", "PaganiDarwinBoot", "ShengPlatformPower", "Stage7Probe", "NativePrelink", "PaganiVerifiedRoot", "Sm8750Platform", "PaganiInput", "PaganiPanel", "QcomGeniSpi"]
+
+[kernel]
+config_fragments = ["arch:configs/common.config", "soc:configs/sm8750.config", "os:configs/ipados.config"]
+patch_series = ["arch:patches/xnu/series", "soc:patches/xnu/series", "os:patches/xnu/pagani-series", "device:patches/xnu/series"]
+defconfig = "oneplus13t_defconfig"
+archives = [
+  "build-corecrypto-14.py",
+  "build-corecrypto-14.py --namespace",
+  "build-libpthread-kernel.py",
+  "component:PaganiArmCpu",
+  "component:NativeAES",
+  "component:NativeUfs",
+  "build-ufs-storage-bindings.py --kernelcache ../../../../ipsw/21H461/kernelcache.decompressed",
+  "component:NativeVirtioBlock",
+  "component:NativeRamBlock",
+  "component:ShengPlatformPower",
+  "build-pagani-verified-root-probe.py --component os --include-systemos",
+  "component:NativeMobileDisplay"
+]
+
+[kernel.prelink]
+tool = "kits/NativePrelink/emit_prelink.py"
+kernel = "build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf"
+kernelcache_sha256 = "f18b4df865405f2a287b84977d7aca745e056d656d9fc9df1662970ce2969de7"
+slide = "-0x1000000"
+early_security_init = "com.apple.driver.AppleMobileFileIntegrity=0xfffffff005ab4ae0"
+roots = [
+  "com.apple.iokit.IOStorageFamily", "com.apple.filesystems.apfs",
+  "com.apple.driver.AppleMobileFileIntegrity", "com.apple.kext.CoreTrust",
+  "com.apple.security.sandbox", "com.apple.driver.ApplePMGR",
+  "com.apple.AppleFSCompression.AppleFSCompressionTypeZlib",
+  "com.apple.iokit.IOSurface", "com.apple.iokit.IOMobileGraphicsFamily",
+  "com.apple.iokit.IOHIDFamily", "com.apple.iokit.IOHIDEventDriver",
+]
+
+[payload]
+skip_setup_tool = "scripts/seed-data-skip-setup.py"
+skip_setup_args = ["--no-auto-dim"]
+volume = "UNIXNU13T"
+size_mib = 160
+loader = "firmware"
+title = "OnePlus 13T Stage 7: early userspace"
+dram_size = "0x180000000"
+timeout = 10
+kernel_args = ["-v", "serial=0", "debug=0x14e", "cpus=8", "sheng-smp=1", "sheng-smp-gic=1", "armcpu-self-ipi=1", "kt_fixed_zones=240", "native-ufs-root=1", "native-ufs-diagnostics=1", "sheng-pmgr=2", "offline-apfs-load=1", "startup_debug=0", "-no_corpses", "sheng-vsync=60", "sheng-vsync-fixed=1", "offline-mobile-graphics-load=1", "offline-legacy-register=1", "offline-legacy-phase=4", "offline-legacy-gop=1", "offline-legacy-pm=1", "offline-legacy-validate=1", "offline-legacy-transfer=1", "offline-legacy-cpu-present=1", "offline-key-events=1", "sheng-aks=1", "pagani-buttons=1", "pagani-touch=1", "pagani-panel=1", "pagani-platform-status=1"]
+trust_cache_sha256 = ["7416ca4f8377146626bb284e2133c76bee6cb4e3ee0af5d648b186235a7323a7"]
+
+[payload.adt]
+ipad_identity = true
+unique_chip_id = "required"
+chip_id = "0x8011"
+packed_data_ramdisk = true
+owned_memory_size = "0x200000000"
+# OS IOMedia UUID confirmed by the mode 12 hardware report.
+root_match_volume_uuid = "04769D26-2CA0-4825-B443-E2E5F88300F2"
+
+[bootimg]
+# This ABL loads init_boot's ramdisk even during fastboot boot.
+embed_payload = true
+
+# PKX110 primary and backup GPT read back on 2026-10-22: 64 GiB on LUN 0.
+# The output filename remains userdata-root.img; deployment targets unixnu only.
+[userdata]
+partition = "unixnu"
+first_lba = 44928768
+last_lba = 61705983
+lba_bytes = 4096
+windows = [
+  { name = "OS", component = "OS" },
+  { name = "SystemOS", component = "Cryptex1,SystemOS" },
+]
+
+[firmware]
+patches = ["Resources/MuPatches/OnePlus13T.patch"]
+config = "oneplus13t"
+dsc = "Platforms/OnePlus/oneplus13tPkg/oneplus13t.dsc"
+fd = "Build/oneplus13tPkg/{target}_CLANGPDB/FV/SILICIUM_UEFI.fd"
+submodules = [
+  "Binaries",
+  "Common/Mu",
+  "Common/Mu_OEM_Sample",
+  "Silicon/Silicium/OpensslPkg/Library/OpensslLib/openssl",
+]
+packages = [
+  "{uefi}",
+  "{uefi}/Platforms/OnePlus",
+  "{tree}/package",
+  "{tree}/drivers/PaganiDarwinBoot",
+  "{edk2}",
+  "{uefi}/Common/Mu",
+  "{uefi}/Common/Mu_OEM_Sample",
+  "{uefi}/Silicon/Qualcomm",
+  "{uefi}/Silicon/Silicium",
+]
+
+[firmware.defines]
+DEVICE_MODEL = "oneplus13t"
+ENABLE_SECUREBOOT = "1"
+MEMORY_PROTECTION = "TRUE"
+SHIP_MODE = "FALSE"
+BUILDID_STRING = "oneplus13t-xnu-early-progress-20261021"
+
+[device_tree]
+source = "device:dts/oneplus13t.dts"
+include_dirs = ["soc:dts"]
+
+[adt.chosen.u32]
+display-scale = 3
+display-rotation = 0
+
+[adt.defaults.u32]
+sleep-disabled = 1
+
+[adt.root.string]
+model = "iPhone10,3"
+target-type = "D22"
+
+[adt.product.string]
+model = "PKX110"
+product-name = "iPhone X"
+product-description = "iPhone X"
+artwork-device-idiom = "phone"
+artwork-display-gamut = "P3"
+compatible-device-fallback = "iPhone10,3"
+
+[adt.product.u32]
+thin-bezel = 1
+artwork-device-subtype = 2436
+artwork-scale-factor = 3
+
+[adt.buttons.string]
+compatible = "buttons"
+device_type = "buttons"
+
+[adt.buttons.strings]
+button-names = ["hold", "voldown", "volup"]
+
+[adt.buttons.u32]
+home-button-type = 2

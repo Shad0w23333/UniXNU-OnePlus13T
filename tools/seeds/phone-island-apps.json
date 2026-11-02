@@ -1,0 +1,84 @@
+{
+  "base": "/private/tmp/claude-501/-Users-xiaochoumao-unixnu-13t/5559c563-618d-4813-9848-be3768908d8c/scratchpad/next2/metal-for-apps/pipeline/out/data-a830-phone-cache-noprime-apps-nowebkit.dbrdisk",
+  "base_bytes": 1073741824,
+  "base_sha256": "5dc21772935f90ffb9f00a2760c25498c311b4baccaf9ba8cea12243078a62f0",
+  "container_bytes": 2147483648,
+  "disabled_jobs": [
+    "com.apple.CommCenter",
+    "com.apple.PerfPowerServices",
+    "com.apple.bluetoothd",
+    "com.apple.fairplayd.A2",
+    "com.apple.identityservicesd",
+    "com.apple.iomfb_fdr_loader",
+    "com.apple.locationd",
+    "com.apple.routined",
+    "com.apple.watchdogd"
+  ],
+  "wallpaper": "/private/var/ngpu/wallpaper-collections",
+  "keyboard": "/private/var/ngpu/textinputui-layouts",
+  "controlcenter": "/private/var/ngpu/controlcenterui",
+  "keyboard_prefs": [
+    {
+      "file": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-seed-i5nzfk5s/mount/mobile/Library/Preferences/com.apple.keyboard.plist",
+      "created": true,
+      "format": "binary",
+      "before": {
+        "KeyboardDisableHitTesting": null
+      },
+      "after": {
+        "KeyboardDisableHitTesting": true
+      },
+      "mode": "600",
+      "owner": "kept"
+    },
+    {
+      "file": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-seed-i5nzfk5s/mount/mobile/Library/Preferences/com.apple.keyboard.ContinuousPath.plist",
+      "created": true,
+      "format": "binary",
+      "before": {
+        "KeyboardContinuousPathEnabled": null
+      },
+      "after": {
+        "KeyboardContinuousPathEnabled": false
+      },
+      "mode": "600",
+      "owner": "kept"
+    }
+  ],
+  "migration_sentinel": "/private/var/datamigrator/migrate",
+  "force_install": {
+    "file": "/private/var/preferences/com.apple.demo.SADForceInstall.plist",
+    "apps": 28,
+    "installation_prefs": "/private/var/mobile/Library/Preferences/com.apple.mobile.installation.plist"
+  },
+  "diag_daemon": {
+    "files": {
+      "/private/var/ngpu/bin/paganidiag": "755",
+      "/private/var/ngpu/bin/paganidiag.conf": "644",
+      "/private/var/preferences/Logging/Subsystems/com.apple.migration.plist": "644",
+      "/private/var/ngpu/daemons/org.unixnu.pagani.diag.plist": "644"
+    },
+    "cdhash": "7301a8050533febe4882323a19deb5a7129ec64b",
+    "host_job": "com.apple.DumpPanic"
+  },
+  "used_kib": 42820,
+  "available_kib": 2046092,
+  "migration_check": {
+    "sentinel": "501:20 644",
+    "sentinel_directory": "501:501 755",
+    "last_system_version": "21H461",
+    "disposition_build": "21H461",
+    "migration_preference_keys": [
+      "DMUserDataDisposition",
+      "LastSystemVersion"
+    ],
+    "available_bytes": 2095226880
+  },
+  "output": {
+    "bytes": 2147483648,
+    "sha256": "673146926df7abac1673f92f6cbd3e676e08a2711d5e24f36bc3306d5a07b487",
+    "encoded_bytes": 44426512,
+    "encoded_sha256": "642d72bd969b024aaa87d5d7327417c8be176fc01676aeda4d056553e2009a68",
+    "packed": true
+  }
+}

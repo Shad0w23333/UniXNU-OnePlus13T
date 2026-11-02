@@ -1,0 +1,1826 @@
+--- a/drivers/BootProgress/RamoopsLog.h
++++ b/drivers/BootProgress/RamoopsLog.h
+@@ -32,6 +32,40 @@
+ // pagani-panic-reset=<seconds> resets that long after a panic screen (without it a panic waits for the pagani-reset-after
+ // deadline when one is set). The reset is PSCI SYSTEM_RESET2 with the architectural warm type when PSCI_FEATURES
+ // advertises it, otherwise SYSTEM_RESET (pagani-reset-cold=1 always takes SYSTEM_RESET); the chosen path is logged first.
++//
++// pagani-reset-seq=<mask> (default 0: nothing changes, not a single extra call) runs, once per boot, the steps the 13T's own
++// Android kernel takes before its PSCI reset (OnePlus sm8750 6.6 tree: qcom_dload_reboot, qcom_scm_shutdown, machine_restart,
++// qcom_scm_do_restart), because Android's reboots reach the PMIC as WARM_RESET (DRAM kept) and ours as HARD_RESET. They run in
++// reset_now after the "reset reason" record and before the PSCI call, in Linux's order; every SCM call is a fast SiP (or OEM)
++// call over SMC #0 and logs one U record with its function id and x0 before the next step; a failure never stops the reset:
++//   0x002 clear the download mode as qcom_dload_reboot does: SCM IO_WRITE 0xc2000502(0x1fd9000, 0) (TCSR 0x1fc0000 + 0x19000,
++//         sun.dtsi qcom,dload-mode), with IO_READ 0xc2000501(0x1fd9000) before and after (read only);
++//   0x001 disable SDI as qcom_scm_shutdown does: SCM 0xc2000109(1, 0) (BOOT / WDOG_DEBUG_PART);
++//   0x004 halt the SPMI PMIC arbiter as qcom_scm_shutdown does: SCM 0xc2000901(0) (PWR / IO_DISABLE_PMIC_ARBITER). Our own
++//         SPMI readers (PaganiInput's 8 ms PON poll, pagani-battery-pmic) are not stopped first: they only read, a read in
++//         flight or issued later fails (-5 or -110) and counts as a missing sample, and the halt precedes the PS_HOLD drop;
++//   0x008 park the other CPUs as smp_send_stop does (an XNU cross-call each: interrupts masked, wfe/wfi forever; waits at
++//         most 1 s for them). It also stops the observer's late retry and the backup timer, which run on other CPUs;
++//   0x010 (beyond Linux's cold path) the OEM warm reboot Linux uses when reboot_mode is warm: SCM 0xc3000922() (OEM_POWER /
++//         OEM_POWER_REBOOT, owner OEM); if it returns, the PSCI reset follows as usual;
++//   0x100 read only: at boot (ramoops_log_start, thread context) SCM IS_CALL_AVAIL 0x42000601 for each call above and the
++//         download mode (IO_READ), one U record each and one screen line (ramoops_reset_seq_status); at the reset the download
++//         mode is read once more. Combine with the other bits freely.
++// A warm reset with the download mode set ends in the crash dump (XBL waits for a USB host, or writes a mini dump to the phone's
++// storage), and Android clears the mode before every reboot. So 0x001, 0x004, 0x008, 0x010, and pagani-reset-cold=1 together
++// with any bit, bring the clear of 0x002 with them (its U records say "implied"), and they run only when the download mode then
++// reads back 0: otherwise one T record names them, they are skipped and the reset takes the path it takes without them
++// (pagani-reset-cold included).
++// The resetting CPU masks interrupts for the steps, and keeps them masked up to the reset once 0x008 parked the other CPUs (as
++// Linux's machine_restart). A second resetter (another CPU, a panic) skips them and waits at most 2 s while they run. An armed
++// pagani-wdog stays armed through them with its shortest bite counted from a pet at the start (no pets after it), so a step that
++// never returns still ends in a bite (GunyahWdog.h); the steps' CPU disables it after them, right before the PSCI call, as the
++// reset does without the steps. The watchdog-bite path (pagani-reset-wdog=1 with an armed pagani-wdog) applies none of them:
++// one T record says so.
++// The mask runs only as written "pagani-reset-seq=0x" and 1 to 8 hex digits (the last occurrence in the boot-args, the one XNU's
++// parser keeps) and with no bit beyond RAMOOPS_RESET_SEQ_KNOWN: XNU's parser turns "0X10F" or a word into the bytes of its first
++// three characters, "010" into octal 8, a bare "pagani-reset-seq" into 1 and more than 8 hex digits into their low 32 bits.
++// Anything else refuses all of it (nothing runs, as without the boot-arg; one T record and the status line say so).
+ #ifndef PAGANI_RAMOOPS_LOG_H
+ #define PAGANI_RAMOOPS_LOG_H
+ #include <stdint.h>
+@@ -63,6 +97,17 @@
+     RAMOOPS_LOG_MASK_DPU = 2,               // bit 1: display probe rows too (at most every 10 s)
+     RAMOOPS_LOG_MASK_DEVICE = 4,            // bit 2: map Device-nGnRE (ml_io_map) instead of write-combined
+ };
++// pagani-reset-seq bits.
++enum {
++    RAMOOPS_RESET_SEQ_SDI = 0x1,            // SCM 0xc2000109(1, 0)
++    RAMOOPS_RESET_SEQ_DLOAD = 0x2,          // SCM 0xc2000502(0x1fd9000, 0), read before and after
++    RAMOOPS_RESET_SEQ_SPMI = 0x4,           // SCM 0xc2000901(0)
++    RAMOOPS_RESET_SEQ_CPUS = 0x8,           // park the other CPUs
++    RAMOOPS_RESET_SEQ_OEM = 0x10,           // SCM 0xc3000922()
++    RAMOOPS_RESET_SEQ_PROBE = 0x100,        // read only: IS_CALL_AVAIL at boot, the download mode at boot and at the reset
++    RAMOOPS_RESET_SEQ_KNOWN = 0x11f,
++    RAMOOPS_RESET_SEQ_WARM = 0x1d,          // the steps that may make the reset warm: only with the download mode read back 0
++};
+ // Record kinds.
+ enum {
+     RAMOOPS_KIND_BOOT = 'B',        // log header: region, XNU RAM, configuration
+@@ -98,8 +143,10 @@
+ int ramoops_log_vm_ready(void);
+ // One line for the screen describing the log and the reset configuration; NULL when all of it is off.
+ const char *ramoops_log_status(void);
+-// boot_progress_start (thread context): PSCI facts and the pagani-reset-after timer.
++// boot_progress_start (thread context): PSCI facts and the pagani-reset-after timer; the pagani-reset-seq probe (0x100).
+ void ramoops_log_start(void);
++// After ramoops_log_start: one line for the screen with the pagani-reset-seq probe's answers; NULL without the probe.
++const char *ramoops_reset_seq_status(void);
+ // Hooks; each is a cheap no-op while the log is off.
+ void ramoops_log_putc(char c);
+ void ramoops_log_line(char kind, const char *text);
+--- a/drivers/BootProgress/RamoopsLog.c
++++ b/drivers/BootProgress/RamoopsLog.c
+@@ -29,6 +29,10 @@
+ void ramoops_platform_ram(uint64_t *base, uint64_t *bytes);
+ void ramoops_log_timer_fired(void);
+ void ramoops_log_backup_timer_fired(void);
++// pagani-reset-seq: the SCM conduit (SMC #0, x0..x7 in and out) and the parking of the other CPUs (returns how many were
++// signalled; each one that parks adds 1 to *parked).
++void ramoops_platform_smc(uint64_t regs[8]);
++unsigned ramoops_platform_park_others(uint32_t *parked);
+ #else
+ #include <pexpert/pexpert.h>
+ #include <pexpert/device_tree.h>
+@@ -36,6 +40,9 @@
+ #include <kern/clock.h>
+ #include <kern/cpu_number.h>
+ #include <kern/timer_call.h>
++// osfmk/arm/cpu_data_internal.h (not included: its scheduler headers warn under this file's -Weverything recipe): NULL for a CPU
++// number without cpu_data. pagani-reset-seq 0x008 only.
++extern struct cpu_data *cpu_datap(int cpu);
+ extern unsigned long gPhysBase, gPhysSize;
+ extern int vsnprintf(char *, size_t, const char *, va_list);
+ static void reset_now(const char *reason);
+@@ -153,8 +160,63 @@
+ }
+ 
+ static void ramoops_platform_ram(uint64_t *base, uint64_t *bytes) { *base = gPhysBase; *bytes = gPhysSize; }
++
++// pagani-reset-seq: SMC #0 with x0..x7 in and out (SMCCC: x8..x17 are not preserved), the conduit the 13T's qcom_scm uses
++// (arm_smccc_smc), as Adreno830's Sm8750ScmSmcInstruction. Under Gunyah the HLOS VM's yielding SiP calls reach TZ (the ZAP load works
++// on the 13T); that the fast SiP and OEM calls do too is what the 0x100 probe and the U records show.
++static void ramoops_platform_smc(uint64_t regs[8])
++{
++    register uint64_t x0 __asm__("x0") = regs[0];
++    register uint64_t x1 __asm__("x1") = regs[1];
++    register uint64_t x2 __asm__("x2") = regs[2];
++    register uint64_t x3 __asm__("x3") = regs[3];
++    register uint64_t x4 __asm__("x4") = regs[4];
++    register uint64_t x5 __asm__("x5") = regs[5];
++    register uint64_t x6 __asm__("x6") = regs[6];
++    register uint64_t x7 __asm__("x7") = regs[7];
++    __asm__ volatile("smc #0" : "+r"(x0), "+r"(x1), "+r"(x2), "+r"(x3), "+r"(x4), "+r"(x5), "+r"(x6), "+r"(x7) :
++                     : "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17", "memory");
++    regs[0] = x0; regs[1] = x1; regs[2] = x2; regs[3] = x3;
++    regs[4] = x4; regs[5] = x5; regs[6] = x6; regs[7] = x7;
++}
++
++// pagani-reset-seq 0x008: what Linux's local_cpu_stop does on the other CPUs after smp_send_stop (interrupts masked, wfe/wfi
++// forever; no PSCI CPU_OFF), reached through an XNU cross-call (interrupt context on that CPU; it never returns).
++__attribute__((noreturn)) static void reset_park_cpu(void *param)
++{
++    __asm__ volatile("msr daifset, #15" ::: "memory");
++    __atomic_add_fetch((uint32_t *)param, 1, __ATOMIC_RELEASE);
++    for (;;) __asm__ volatile("wfe\n\twfi" ::: "memory");
++}
++
++// The immediate cross-call (SIGPxcallImm) fails at once when one is already pending on that CPU instead of spinning towards
++// cpu_signal_internal's timeout panic, and an offline CPU fails at once too (SIGPdisabled); a CPU without cpu_data (never
++// registered) is skipped, since cpu_xcall_internal panics on it. Nothing here waits.
++static unsigned ramoops_platform_park_others(uint32_t *parked)
++{
++    const int self = cpu_number(), max = ml_get_max_cpu_number();
++    unsigned signalled = 0;
++    for (unsigned n = 0; max >= 0 && n <= (unsigned)max; n++) {     // unsigned: no overflow check (UBSan trap) in a reset path
++        const int cpu = (int)n;
++        if (cpu == self || !cpu_datap(cpu)) continue;
++        if (cpu_immediate_xcall(cpu, reset_park_cpu, parked) == KERN_SUCCESS) signalled++;
++    }
++    return signalled;
++}
+ #endif
+ 
++#ifdef RAMOOPS_LOG_TEST
++// Test/ramoops.c and Test/crash.c, where GunyahWdog.c is not linked: the watchdog's side of a reset (pagani-reset-wdog's bite, and
++// the hold through pagani-reset-seq's steps with its release).
++int ramoops_platform_wdog_bite(const char *reason);
++int ramoops_platform_wdog_hold(const char *reason);
++void ramoops_platform_wdog_release(const char *reason);
++#else
++static int ramoops_platform_wdog_bite(const char *reason) { return gunyah_wdog_bite_reset(reason); }
++static int ramoops_platform_wdog_hold(const char *reason) { return gunyah_wdog_hold_for_steps(reason); }
++static void ramoops_platform_wdog_release(const char *reason) { gunyah_wdog_release_hold(reason); }
++#endif
++
+ #define PSCI_VERSION 0x84000000u
+ #define PSCI_SYSTEM_RESET 0x84000009u
+ #define PSCI_FEATURES 0x8400000au
+@@ -201,6 +263,7 @@
+ static uint32_t sequence, run_id, lock_word, drops, drops_reported, lock_suspect;
+ static uint64_t start_counter, counter_hz, heartbeat_at;
+ static uint32_t reset_after_seconds, panic_reset_seconds, reset_cold, reset_wdog;
++static int reset_cold_skipped;              // pagani-reset-seq: the download mode did not read back 0, so not without SYSTEM_RESET2
+ static uint64_t reset_deadline;             // counter value; 0: no timed reset
+ static int reset_armed, reset_started, headless_panic, reset_parked;
+ static uint64_t reset_started_at;          // counter value when reset_now began (the observer's late retry)
+@@ -241,11 +304,19 @@
+     return crc;
+ }
+ 
++#ifdef RAMOOPS_HOST
++// The host tests' stand-in for PSTATE.DAIF, per thread: irq_off masks, irq_restore_flags puts the saved state back.
++static _Thread_local int host_daif_masked;
++#endif
++
+ static uint64_t irq_off(void)
+ {
+     uint64_t flags = 0;
+ #ifndef RAMOOPS_HOST
+     __asm__ volatile("mrs %0, daif\n\tmsr daifset, #15" : "=r"(flags) :: "memory");
++#else
++    flags = (uint64_t)host_daif_masked;
++    host_daif_masked = 1;
+ #endif
+     return flags;
+ }
+@@ -255,7 +326,7 @@
+ #ifndef RAMOOPS_HOST
+     __asm__ volatile("msr daif, %0" :: "r"(flags) : "memory");
+ #else
+-    (void)flags;
++    host_daif_masked = (int)flags;
+ #endif
+ }
+ 
+@@ -602,7 +673,8 @@
+ 
+ static int psci_reset2(void)
+ {
+-    return !reset_cold && (psci_version >> 16) >= 1 && psci_version != UINT32_MAX && psci_reset2_features >= 0;
++    return (!reset_cold || reset_cold_skipped) && (psci_version >> 16) >= 1 && psci_version != UINT32_MAX &&
++           psci_reset2_features >= 0;
+ }
+ 
+ static void put_psci(struct text *t)
+@@ -624,8 +696,248 @@
+     int32_t value = (int32_t)(uint32_t)result;
+     if (value < 0) { put_char(t, '-'); put_dec(t, (uint64_t)(-(int64_t)value)); }
+     else put_dec(t, (uint64_t)value);
++}
++
++// ---- pagani-reset-seq (RamoopsLog.h) ---------------------------------------------------------------------------------------
++// The calls as the 13T's own kernel makes them (OnePlus sm8750 6.6: drivers/firmware/qcom_scm.c, qcom_scm-smc.c): fast calls,
++// SMC64, x0 the function id, x1 the arginfo (QCOM_SCM_ARGS(n) = n for value arguments), x2.. the arguments. IS_CALL_AVAIL is a
++// standard (yielding) call; only the probe at boot makes it (thread context, interrupts enabled).
++#define RESET_SEQ_FN_SDI_OFF 0xc2000109u        // SiP BOOT 0x01 / WDOG_DEBUG_PART 0x09 (qcom_scm_disable_sdi): (1, 0)
++#define RESET_SEQ_FN_IO_READ 0xc2000501u        // SiP IO 0x05 / READ 0x01 (qcom_scm_io_readl): (address), the value in x1
++#define RESET_SEQ_FN_IO_WRITE 0xc2000502u       // SiP IO 0x05 / WRITE 0x02 (qcom_scm_io_writel): (address, value)
++#define RESET_SEQ_FN_ARB_HALT 0xc2000901u       // SiP PWR 0x09 / IO_DISABLE_PMIC_ARBITER 0x01 (qcom_scm_halt_spmi_pmic_arbiter): (0)
++#define RESET_SEQ_FN_OEM_REBOOT 0xc3000922u     // OEM OEM_POWER 0x09 / OEM_POWER_REBOOT 0x22 (qcom_scm_reboot): no arguments
++#define RESET_SEQ_FN_IS_AVAIL 0x42000601u       // SiP INFO 0x06 / IS_CALL_AVAIL 0x01, standard: (owner << 24 | svc << 8 | cmd)
++#define RESET_SEQ_DLOAD_PA 0x1fd9000u           // the download mode: TCSR 0x1fc0000 + 0x19000 (sun.dtsi qcom_scm qcom,dload-mode)
++enum {
++    RESET_SEQ_IDLE, RESET_SEQ_RUNNING, RESET_SEQ_DONE,
++    RESET_SEQ_RESUMES = 64,                     // SMCs per call, INTERRUPTED continuations included
++    RESET_SEQ_PARK_MS = 1000,                   // the wait for the parked CPUs (smp_send_stop waits 1 s too)
++    RESET_SEQ_WAIT_SECONDS = 2,                 // a second resetter's wait for the steps
++    RESET_SEQ_PROBES = 6,
++};
++static uint32_t reset_seq_mask, reset_cpus_parked;
++static uint32_t reset_seq_refused;          // the parsed value of a refused pagani-reset-seq (S5 below); its mask stays 0
++static int reset_seq_state, reset_seq_probed;
++static char reset_seq_text[RAMOOPS_LOG_TEXT_MAX + 1], reset_seq_screen[160];
++// What the probe asks IS_CALL_AVAIL about: the SiP calls above, SET_DLOAD_MODE (0x0110, Linux's fallback without a dload
++// address) and the OEM reboot (the owner field says OEM; Linux never asks about it).
++static const uint32_t reset_seq_probe_ids[RESET_SEQ_PROBES] = {0x02000109, 0x02000110, 0x02000501, 0x02000502, 0x02000901, 0x03000922};
++static const char reset_seq_probe_names[RESET_SEQ_PROBES][5] = {"sdi", "dl", "rd", "wr", "spmi", "oem"};
++
++struct scm_answer {
++    int64_t x0;
++    uint64_t x1;
++    uint32_t smcs;
++};
++
++// One call as Linux's __scm_smc_do_quirk makes it: while x0 comes back INTERRUPTED (1) the same registers go out again with x0 = 1
++// and the returned x6 (at most RESET_SEQ_RESUMES SMCs in all).
++static void reset_seq_scm(uint64_t function, uint64_t arginfo, uint64_t a, uint64_t b, struct scm_answer *answer)
++{
++    uint64_t x0 = function, x6 = 0;
++    answer->smcs = 0;
++    for (;;) {
++        uint64_t regs[8];
++        regs[0] = x0; regs[1] = arginfo; regs[2] = a; regs[3] = b;
++        regs[4] = 0; regs[5] = 0; regs[6] = x6; regs[7] = 0;
++        ramoops_platform_smc(regs);
++        answer->smcs++;
++        answer->x0 = (int64_t)regs[0];
++        answer->x1 = regs[1];
++        if (regs[0] != 1 || answer->smcs >= RESET_SEQ_RESUMES) return;
++        x0 = 1;
++        x6 = regs[6];
++    }
++}
++
++// The reset path's records take the lock by force (a stopped holder must not hold back a reset).
++static void reset_seq_record(char kind, const char *text)
++{
++    if (!log_on()) return;
++    uint64_t flags = lock_log(1);
++    emit_text(kind, text);
++    unlock_log(flags);
++}
++
++// One call and its U record "<label> SCM 0x<function>(<arguments>) = <x0>[ x1 0x<x1>]" (x0 as Linux reads it: its low 32 bits,
++// signed); returns x0, *x1 the returned x1.
++static int64_t reset_seq_call(const char *label, uint64_t function, unsigned args, uint64_t a, uint64_t b, int show_x1,
++                              uint64_t *x1)
++{
++    struct scm_answer answer;
++    struct text t;
++    reset_seq_scm(function, args, a, b, &answer);
++    text_start(&t, reset_seq_text, sizeof(reset_seq_text));
++    put_str(&t, label);
++    put_str(&t, " SCM ");
++    put_hex(&t, function);
++    put_char(&t, '(');
++    if (args > 0) put_hex(&t, a);
++    if (args > 1) { put_str(&t, ", "); put_hex(&t, b); }
++    put_str(&t, ") = ");
++    put_result(&t, answer.x0);
++    if (answer.x0 == 1) { put_str(&t, " (still INTERRUPTED after "); put_dec(&t, answer.smcs); put_str(&t, " SMCs)"); }
++    if (show_x1 && !answer.x0) { put_str(&t, " x1 "); put_hex(&t, answer.x1); }
++    reset_seq_record(RAMOOPS_KIND_TRACE, reset_seq_text);
++    if (x1) *x1 = answer.x1;
++    return answer.x0;
++}
++
++// 0x100 at boot (ramoops_log_start: thread context, interrupts enabled, before any driver makes SCM calls): IS_CALL_AVAIL for each
++// call and the download mode, one U record each, and the screen line. Changes nothing.
++static void reset_seq_probe_boot(void)
++{
++    struct text s;
++    uint64_t x1 = 0;
++    text_start(&s, reset_seq_screen, sizeof(reset_seq_screen));
++    put_str(&s, "reset seq ");                  // at most 79 characters for -1 answers (a BootProgress stage line)
++    put_hex(&s, reset_seq_mask);
++    put_str(&s, " avail");
++    for (unsigned i = 0; i < RESET_SEQ_PROBES; i++) {
++        int64_t x0 = reset_seq_call("reset seq probe: avail", RESET_SEQ_FN_IS_AVAIL, 1, reset_seq_probe_ids[i], 0, 1, &x1);
++        put_char(&s, ' ');
++        put_str(&s, reset_seq_probe_names[i]);
++        put_char(&s, ' ');
++        if (x0) { put_char(&s, 'e'); put_result(&s, x0); }
++        else put_dec(&s, x1 != 0);
++    }
++    int64_t x0 = reset_seq_call("reset seq probe: dload read", RESET_SEQ_FN_IO_READ, 1, RESET_SEQ_DLOAD_PA, 0, 1, &x1);
++    put_str(&s, " dload ");
++    if (x0) { put_char(&s, 'e'); put_result(&s, x0); }
++    else put_hex(&s, (uint32_t)x1);
++}
++
++const char *ramoops_reset_seq_status(void) { return reset_seq_screen[0] ? reset_seq_screen : NULL; }
++
++// 0x008: park the other CPUs, then wait at most RESET_SEQ_PARK_MS for them; one U record.
++static void reset_seq_park(void)
++{
++    struct text t;
++    const uint64_t start = log_counter(), limit = (uint64_t)RESET_SEQ_PARK_MS * counter_hz / 1000;
++    const unsigned signalled = ramoops_platform_park_others(&reset_cpus_parked);
++    uint32_t parked = __atomic_load_n(&reset_cpus_parked, __ATOMIC_ACQUIRE);
++    while (parked < signalled && log_counter() - start < limit) {
++        relax();
++        parked = __atomic_load_n(&reset_cpus_parked, __ATOMIC_ACQUIRE);
++    }
++    text_start(&t, reset_seq_text, sizeof(reset_seq_text));
++    put_str(&t, "reset seq: park CPUs: ");
++    put_dec(&t, parked);
++    put_str(&t, " of ");
++    put_dec(&t, signalled);
++    put_str(&t, " signalled CPUs parked in ");
++    put_dec(&t, counter_hz ? (log_counter() - start) * 1000 / counter_hz : 0);
++    put_str(&t, parked < signalled ? " ms (gave up after 1 s)" : " ms");
++    reset_seq_record(RAMOOPS_KIND_TRACE, reset_seq_text);
+ }
+ 
++// The names of the steps in mask (and pagani-reset-cold when cold is set), each after a space.
++static void put_seq_steps(struct text *t, uint32_t mask, int cold)
++{
++    if (mask & RAMOOPS_RESET_SEQ_SDI) put_str(t, " sdi-off");
++    if (mask & RAMOOPS_RESET_SEQ_SPMI) put_str(t, " spmi-halt");
++    if (mask & RAMOOPS_RESET_SEQ_CPUS) put_str(t, " park-cpus");
++    if (mask & RAMOOPS_RESET_SEQ_OEM) put_str(t, " oem-warm-reboot");
++    if (cold) put_str(t, " pagani-reset-cold");
++}
++
++// The steps, in Linux's order: the download mode (reboot notifier), SDI and the SPMI arbiter (qcom_scm_shutdown), the other
++// CPUs (machine_restart's smp_send_stop), the OEM warm reboot (qcom_scm_do_restart for reboot_mode warm). Interrupts stay off
++// on this CPU meanwhile, as in machine_restart; the caller's state comes back for the PSCI reset unless 0x008 parked the other CPUs.
++static void reset_seq_run(const char *reason)
++{
++    const uint32_t mask = reset_seq_mask;
++    const uint64_t began = log_counter();
++    // F1 of the 2026-10-31 review: a warm reset with the download mode set ends in the crash dump (XBL waits for a USB host, or a
++    // mini dump goes to the phone's storage), and Android clears the mode before every reboot (13T qcom_dload_reboot: NODUMP first,
++    // whatever the command). So a step that may make the reset warm, and pagani-reset-cold (the reset without the failing
++    // SYSTEM_RESET2, as Android's), come with the clear and run only when the mode then reads back 0.
++    const int warm = (mask & RAMOOPS_RESET_SEQ_WARM) || reset_cold;
++    const int implied = warm && !(mask & RAMOOPS_RESET_SEQ_DLOAD);
++    struct text t;
++    text_start(&t, reset_seq_text, sizeof(reset_seq_text));
++    put_str(&t, "reset seq ");
++    put_hex(&t, mask);
++    put_str(&t, " (pagani-reset-seq) reason=");
++    put_str(&t, reason);
++    put_char(&t, ':');
++    if (mask & RAMOOPS_RESET_SEQ_PROBE) put_str(&t, " probe");
++    if (mask & RAMOOPS_RESET_SEQ_DLOAD) put_str(&t, " dload-clear");
++    if (implied) put_str(&t, " dload-clear(implied)");
++    put_seq_steps(&t, mask, 0);
++    reset_seq_record(RAMOOPS_KIND_RESET, reset_seq_text);
++    const uint64_t flags = irq_off();
++    uint32_t steps = mask;
++    if ((mask & RAMOOPS_RESET_SEQ_PROBE) && !(mask & RAMOOPS_RESET_SEQ_DLOAD) && !implied)
++        (void)reset_seq_call("reset seq: dload read", RESET_SEQ_FN_IO_READ, 1, RESET_SEQ_DLOAD_PA, 0, 1, NULL);
++    if ((mask & RAMOOPS_RESET_SEQ_DLOAD) || implied) {
++        uint64_t x1 = 0;
++        (void)reset_seq_call(implied ? "reset seq: dload read (implied)" : "reset seq: dload read", RESET_SEQ_FN_IO_READ, 1,
++                             RESET_SEQ_DLOAD_PA, 0, 1, NULL);
++        (void)reset_seq_call(implied ? "reset seq: dload clear (implied)" : "reset seq: dload clear", RESET_SEQ_FN_IO_WRITE, 2,
++                             RESET_SEQ_DLOAD_PA, 0, 0, NULL);
++        const int64_t x0 = reset_seq_call(implied ? "reset seq: dload read back (implied)" : "reset seq: dload read back",
++                                          RESET_SEQ_FN_IO_READ, 1, RESET_SEQ_DLOAD_PA, 0, 1, &x1);
++        // Judged as Linux reads them (qcom_scm_io_readl): x0 on its low 32 bits, the register's 32 bits in x1.
++        if (warm && ((uint32_t)x0 || (uint32_t)x1)) {
++            // Not cleared (the write refused, the read failed or INTERRUPTED to the end): the reset goes as without these.
++            steps &= ~(uint32_t)RAMOOPS_RESET_SEQ_WARM;
++            reset_cold_skipped = reset_cold != 0;
++            text_start(&t, reset_seq_text, sizeof(reset_seq_text));
++            put_str(&t, "reset seq: the download mode reads back ");
++            if ((uint32_t)x0) { put_str(&t, "x0 "); put_result(&t, x0); }
++            else put_hex(&t, (uint32_t)x1);
++            put_str(&t, ", not 0:");
++            put_seq_steps(&t, mask, reset_cold != 0);
++            put_str(&t, " skipped (a warm reset would enter the crash dump)");
++            reset_seq_record(RAMOOPS_KIND_RESET, reset_seq_text);
++        }
++    }
++    if (steps & RAMOOPS_RESET_SEQ_SDI) (void)reset_seq_call("reset seq: SDI off", RESET_SEQ_FN_SDI_OFF, 2, 1, 0, 0, NULL);
++    if (steps & RAMOOPS_RESET_SEQ_SPMI)
++        (void)reset_seq_call("reset seq: SPMI arbiter halt", RESET_SEQ_FN_ARB_HALT, 1, 0, 0, 0, NULL);
++    if (steps & RAMOOPS_RESET_SEQ_CPUS) reset_seq_park();
++    if (steps & RAMOOPS_RESET_SEQ_OEM) {
++        // Expected not to return: the record before it shows the call went out.
++        reset_seq_record(RAMOOPS_KIND_TRACE, "reset seq: OEM warm reboot SCM 0xc3000922() next");
++        (void)reset_seq_call("reset seq: OEM warm reboot returned:", RESET_SEQ_FN_OEM_REBOOT, 0, 0, 0, 0, NULL);
++    }
++    // S4 of the review: with the other CPUs parked, interrupts stay masked here up to the reset (and through reset_retry), as Linux's
++    // machine_restart keeps them from local_irq_disable on; the observer's thread, preempted here, could hand this CPU to a thread
++    // that spins on a lock a parked CPU holds.
++    if (!(steps & RAMOOPS_RESET_SEQ_CPUS)) irq_restore_flags(flags);
++    text_start(&t, reset_seq_text, sizeof(reset_seq_text));
++    put_str(&t, "reset seq done in ");
++    put_dec(&t, counter_hz ? (log_counter() - began) * 1000 / counter_hz : 0);
++    put_str(&t, " ms; resetting through PSCI");
++    reset_seq_record(RAMOOPS_KIND_RESET, reset_seq_text);
++}
++
++// From reset_now, with pagani-reset-seq set: the first resetter runs the steps (it claimed them right after reset_started), a
++// later one waits at most RESET_SEQ_WAIT_SECONDS while they run; the watchdog-bite path applies none.
++static void reset_seq(const char *reason, int first, int bite)
++{
++    if (!first) {
++        const uint64_t start = log_counter(), limit = (uint64_t)RESET_SEQ_WAIT_SECONDS * counter_hz;
++        while (__atomic_load_n(&reset_seq_state, __ATOMIC_ACQUIRE) == RESET_SEQ_RUNNING && log_counter() - start < limit) relax();
++        return;
++    }
++    if (bite) {
++        struct text t;
++        text_start(&t, reset_seq_text, sizeof(reset_seq_text));
++        put_str(&t, "reset seq ");
++        put_hex(&t, reset_seq_mask);
++        put_str(&t, " not applied: the watchdog bite resets (pagani-reset-wdog)");
++        reset_seq_record(RAMOOPS_KIND_RESET, reset_seq_text);
++        return;
++    }
++    reset_seq_run(reason);
++    // The watchdog held through the steps (reset_now) goes off now, right before PSCI, as for a reset without them.
++    ramoops_platform_wdog_release(reason);
++    __atomic_store_n(&reset_seq_state, RESET_SEQ_DONE, __ATOMIC_RELEASE);
++}
++
+ // Only the first resetting CPU builds text here, so it needs no lock of its own.
+ static char reset_text[200];
+ 
+@@ -643,13 +955,21 @@
+ {
+     // pagani-reset-wdog=1 with pagani-wdog: the watchdog's bite resets (it kept the log where SYSTEM_RESET flipped weak DRAM cells);
+     // PSCI only if no bite came within 10 s. Otherwise no watchdog bite races the PSCI reset (GunyahWdog.h).
+-    int bite = 0;
++    int bite = 0, held = 0;
++    if (reset_wdog) bite = ramoops_platform_wdog_bite(reason);
++    // pagani-reset-seq: the watchdog stays armed through the steps instead, with its shortest bite from a pet now, so a step that
++    // never returns still ends in a bite (S3 of the 2026-10-31 review: disabled here first, such a step left only a manual reset);
++    // reset_seq disables it after them.
++    if (!bite && reset_seq_mask) held = ramoops_platform_wdog_hold(reason);
+ #ifndef RAMOOPS_LOG_TEST
+-    if (reset_wdog) bite = gunyah_wdog_bite_reset(reason);
+-    if (!bite) gunyah_wdog_before_reset(reason);
++    if (!bite && !held) gunyah_wdog_before_reset(reason);
++#else
++    (void)held;
+ #endif
+     int first = !__atomic_exchange_n(&reset_started, 1, __ATOMIC_ACQ_REL);
+     if (first) __atomic_store_n(&reset_started_at, log_counter(), __ATOMIC_RELEASE);
++    // pagani-reset-seq: the first resetter claims the steps at once, so a second one waits for them (reset_seq).
++    if (first && reset_seq_mask && !bite) __atomic_store_n(&reset_seq_state, RESET_SEQ_RUNNING, __ATOMIC_RELEASE);
+     struct text t;
+     psci_resolve();
+     if (first && log_on()) {
+@@ -668,6 +988,7 @@
+         zones_stamp();
+         unlock_log(flags);
+     }
++    if (reset_seq_mask) reset_seq(reason, first, bite);
+ #ifndef RAMOOPS_HOST
+     // The bite comes within the shortest bite time (4 s) of the last pet: PSCI only if it has not come 10 s later.
+     if (bite && counter_hz) {
+@@ -714,6 +1035,51 @@
+ {
+     if (reset_after_seconds) { put_str(t, "; reset after "); put_dec(t, reset_after_seconds); put_str(t, " s"); }
+     if (panic_reset_seconds) { put_str(t, "; panic reset "); put_dec(t, panic_reset_seconds); put_str(t, " s"); }
++    if (reset_seq_mask) { put_str(t, "; reset seq "); put_hex(t, reset_seq_mask); }
++    else if (reset_seq_refused) { put_str(t, "; reset seq REFUSED "); put_hex(t, reset_seq_refused); }
++}
++
++// S5 of the 2026-10-31 review: XNU's parser (pexpert/gen/bootargs.c getval, argstrcpy2, argnumcpy) reads "0x" + hex digits, "0b"
++// binary, a leading 0 as octal and decimal; anything else ("0X10F", a word) comes back as the bytes of its first three characters
++// (0X10F: 0x315830, OEM bit set), a bare name as 1, and only the low 32 bits of a longer number. The parse goes on after a match,
++// so the last occurrence counts. The value text of that occurrence (NULL with *bare set for a bare name; NULL alone: not found).
++static const char *reset_seq_written(const char *args, unsigned *length, int *bare)
++{
++    static const char name[] = "pagani-reset-seq";
++    const char *value = NULL;
++    *length = 0;
++    *bare = 0;
++    for (const char *p = args; p && *p;) {
++        while (*p == ' ' || *p == '\t') p++;
++        const char *token = p;
++        while (*p && *p != ' ' && *p != '\t') p++;
++        unsigned n = 0, same = 0;
++        while (token + n < p && token[n] != '=') n++;
++        if (n != sizeof(name) - 1) continue;
++        while (same < n && token[same] == name[same]) same++;
++        if (same != n) continue;
++        value = token + n < p ? token + n + 1 : NULL;
++        *bare = value == NULL;
++        *length = value ? (unsigned)(p - value) : 0;
++    }
++    return value;
++}
++
++// Why the parsed pagani-reset-seq value may not run (NULL: it may): it must be written "0x" and 1 to 8 hex digits, read as that
++// value, with known bits only.
++static const char *reset_seq_refusal(uint32_t value, const char *text, unsigned length)
++{
++    if (value & ~(uint32_t)RAMOOPS_RESET_SEQ_KNOWN) return "unknown bits";
++    if (!text || length < 3 || length > 10 || text[0] != '0' || text[1] != 'x') return "not written as 0x and 1 to 8 hex digits";
++    uint32_t written = 0;
++    for (unsigned i = 2; i < length; i++) {
++        const char c = text[i];
++        const uint32_t digit = c >= '0' && c <= '9' ? (uint32_t)(c - '0') : c >= 'a' && c <= 'f' ? (uint32_t)(c - 'a' + 10) :
++                               c >= 'A' && c <= 'F' ? (uint32_t)(c - 'A' + 10) : 16u;
++        if (digit > 15) return "not written as 0x and 1 to 8 hex digits";
++        written = written << 4 | digit;
++    }
++    return written == value ? NULL : "parsed as another value";
+ }
+ 
+ static int refuse(const char *why, uint64_t a, uint64_t b)
+@@ -738,6 +1104,8 @@
+     reset_armed = 0; reset_started = 0; headless_panic = 0; reset_parked = 0; psci_resolved = 0;
+     reset_started_at = 0; reset_observer_retries = 0;
+     reset_timer_cpu = -1; reset_backup_cpu = -1; reset_backup_armed = 0;
++    reset_seq_mask = 0; reset_cpus_parked = 0; reset_seq_state = RESET_SEQ_IDLE; reset_seq_probed = 0; reset_seq_screen[0] = 0;
++    reset_seq_refused = 0; reset_cold_skipped = 0;
+     console_line.length = 0; console_line.continued = 0; panic_line.length = 0; panic_line.continued = 0;
+     console_line.area = AREA_CONSOLE; panic_line.area = AREA_EVENTS;
+     rowsets[0].valid = 0; rowsets[1].valid = 0; rowsets[0].sets = 0; rowsets[1].sets = 0;
+@@ -751,11 +1119,22 @@
+     value = 0;
+     if (ramoops_platform_arg("pagani-reset-cold", &value, sizeof(value))) reset_cold = value != 0;
+     if (ramoops_platform_arg("pagani-reset-wdog", &value, sizeof(value))) reset_wdog = value != 0;
++    value = 0;
++    // pagani-reset-seq: taken only as written and with known bits (S5 above); otherwise none of it runs.
++    const char *seq_text = NULL, *seq_why = NULL;
++    unsigned seq_length = 0;
++    int seq_bare = 0;
++    if (ramoops_platform_arg("pagani-reset-seq", &value, sizeof(value)) && value) {
++        seq_text = reset_seq_written(ramoops_platform_boot_args(), &seq_length, &seq_bare);
++        seq_why = reset_seq_refusal(value, seq_text, seq_length);
++        if (seq_why) reset_seq_refused = value;
++        else reset_seq_mask = value;
++    }
+     if (reset_after_seconds) reset_deadline = start_counter + (uint64_t)reset_after_seconds * counter_hz;
+     value = 0;
+     if (ramoops_platform_arg("pagani-ramoops", &value, sizeof(value))) log_mask = value;
+     if (!(log_mask & RAMOOPS_LOG_MASK_LOG)) {
+-        if (reset_after_seconds || panic_reset_seconds) {
++        if (reset_after_seconds || panic_reset_seconds || reset_seq_refused) {
+             text_start(&t, status, sizeof(status));
+             put_str(&t, "ramoops off");
+             put_seconds_config(&t);
+@@ -859,8 +1238,23 @@
+     put_str(&t, "s panic-reset=");
+     put_dec(&t, panic_reset_seconds);
+     put_char(&t, 's');
++    if (reset_seq_mask) { put_str(&t, " reset-seq="); put_hex(&t, reset_seq_mask); }
+     emit_text(RAMOOPS_KIND_BOOT, scratch);
+     emit_text(RAMOOPS_KIND_ARGS, ramoops_platform_boot_args());
++    if (reset_seq_refused) {
++        text_start(&t, scratch, sizeof(scratch));
++        put_str(&t, "reset seq refused: pagani-reset-seq");
++        if (seq_text) {
++            put_char(&t, '=');
++            for (unsigned i = 0; i < seq_length && i < 24; i++) put_char(&t, seq_text[i]);
++        } else put_str(&t, seq_bare ? " (no value)" : " (not in the boot-args)");
++        put_str(&t, " read as ");
++        put_hex(&t, reset_seq_refused);
++        put_str(&t, ": ");
++        put_str(&t, seq_why);
++        put_str(&t, "; none of it runs (write the mask as 0x and 1 to 8 hex digits)");
++        emit_text(RAMOOPS_KIND_RESET, scratch);
++    }
+     unlock_log(flags);
+ 
+     text_start(&t, status, sizeof(status));
+@@ -877,6 +1271,10 @@
+ 
+ void ramoops_log_start(void)
+ {
++    if ((reset_seq_mask & RAMOOPS_RESET_SEQ_PROBE) && !reset_seq_probed) {
++        reset_seq_probed = 1;
++        reset_seq_probe_boot();
++    }
+     if (!log_on() && !reset_after_seconds && !panic_reset_seconds) return;
+     psci_resolve();
+     uint64_t ms = 0;
+--- a/drivers/BootProgress/GunyahWdog.h
++++ b/drivers/BootProgress/GunyahWdog.h
+@@ -30,7 +30,8 @@
+ // when it begins and once when it ends; past the bite time the bite resets the phone.
+ // A panic stops the pets. When RamoopsLog resets after it (ramoops_log_panic_footer() != NULL) the watchdog is disabled
+ // first, so the two resets cannot race; otherwise it is left armed and the bite resets the phone.
+-// gunyah_wdog_before_reset disables it before an intentional PSCI reset.
++// gunyah_wdog_before_reset disables it before an intentional PSCI reset. With pagani-reset-seq the reset first holds it armed with
++// the shortest bite through its steps (gunyah_wdog_hold_for_steps) and disables it after them (gunyah_wdog_release_hold).
+ //
+ // pagani-wdog-stop-pet=<seconds> (test only) stops the pets that long after arming, as a hang would, and the pet thread
+ // then logs STATUS once a second until the bite. pagani-wdog-hvc=1 issues the calls with HVC instead of SMC (fallback
+@@ -81,6 +82,14 @@
+ // the phone with no PSCI call (a bite kept the ramoops log intact where SYSTEM_RESET left weak DRAM cells flipped, 2026-10-30).
+ // 1 when the watchdog is ours and armed, else 0 (the caller resets through PSCI).
+ int gunyah_wdog_bite_reset(const char *reason);
++// RamoopsLog's reset with pagani-reset-seq, in place of gunyah_wdog_before_reset: stops the pets and, when the watchdog is ours and
++// armed, PET then SET_TIME(bark 2000, bite 4000) and leaves it armed, so a reset step that never returns (an SCM call, the CPU
++// park) still ends in the bite 4 s later. 1: done by this call; 2: another resetter already settled the watchdog (nothing to do);
++// 0: not ours or not armed (the caller goes on with gunyah_wdog_before_reset, which then does nothing either).
++int gunyah_wdog_hold_for_steps(const char *reason);
++// After the pagani-reset-seq steps, right before the PSCI reset (the CPU that ran them): disables the watchdog held above, as
++// gunyah_wdog_before_reset does for a reset without steps. Nothing when it is not ours and armed.
++void gunyah_wdog_release_hold(const char *reason);
+ #ifdef __cplusplus
+ }
+ #endif
+--- a/drivers/BootProgress/GunyahWdog.c
++++ b/drivers/BootProgress/GunyahWdog.c
+@@ -181,6 +181,7 @@
+ static char wdog_status_line[96], wdog_footer[64];
+ static char wdog_start_text[WDOG_TEXT], wdog_thread_text[WDOG_TEXT], wdog_tick_text[WDOG_TEXT];
+ static char wdog_panic_text[WDOG_TEXT], wdog_reset_text[WDOG_TEXT], wdog_retry_text[WDOG_TEXT], wdog_bite_text[WDOG_TEXT];
++static char wdog_hold_text[WDOG_TEXT], wdog_release_text[WDOG_TEXT];   // pagani-reset-seq: the holding and the steps' CPU
+ 
+ static void wdog_text_start(struct wdog_text *t, char *buffer, uint32_t room)
+ {
+@@ -699,6 +700,50 @@
+     return 1;
+ }
+ 
++// pagani-reset-seq (the 2026-10-31 review's S3): gunyah_wdog_before_reset disabled the watchdog before the reset steps, so an SCM
++// call that never returned (or a CPU park that wedged) left nothing but a manual reset. The pet comes first, so the bite is 4 s from
++// now even when the last pet is older than that (pets withheld before the reset); the steps take about a second at most.
++int gunyah_wdog_hold_for_steps(const char *reason)
++{
++    __atomic_store_n(&wdog_pets_stopped, 1, __ATOMIC_RELEASE);
++    if (__atomic_load_n(&wdog_state, __ATOMIC_ACQUIRE) != WDOG_ARMED) return 0;
++    if (__atomic_exchange_n(&wdog_resetting, 1, __ATOMIC_ACQ_REL)) return 2;
++    const uint32_t bite = GUNYAH_WDOG_MIN_SECONDS * 1000, bark = bite / 2;
++    struct wdog_result pet = wdog_call(GUNYAH_WDOG_FN_PET, 0, 0);
++    if (!pet.error) __atomic_store_n(&wdog_last_pet, wdog_now(), __ATOMIC_RELEASE);
++    struct wdog_result times = wdog_call(GUNYAH_WDOG_FN_SET_TIME, bark, bite);
++    struct wdog_text t;
++    wdog_text_start(&t, wdog_hold_text, WDOG_TEXT);
++    wdog_put_str(&t, "wdog: ");
++    wdog_put_str(&t, reason ? reason : "?");
++    wdog_put_str(&t, " reset: pets stopped, PET(0x86000007)=");
++    wdog_put_error(&t, pet.error);
++    wdog_put_str(&t, " SET_TIME(0x86000008, bark ");
++    wdog_put_dec(&t, bark);
++    wdog_put_str(&t, ", bite ");
++    wdog_put_dec(&t, bite);
++    wdog_put_str(&t, ")=");
++    wdog_put_error(&t, times.error);
++    wdog_put_str(&t, ": armed through the reset steps (pagani-reset-seq)");
++    ramoops_log_line(RAMOOPS_KIND_RESET, t.at);
++    return 1;
++}
++
++// Whoever held it: the steps' CPU calls this once they are done (a second resetter that only waited for them does not).
++void gunyah_wdog_release_hold(const char *reason)
++{
++    struct wdog_result r = {0, 0, 0};
++    if (!wdog_disable(&r)) return;
++    struct wdog_text t;
++    wdog_text_start(&t, wdog_release_text, WDOG_TEXT);
++    wdog_put_str(&t, "wdog: ");
++    wdog_put_str(&t, reason ? reason : "?");
++    wdog_put_str(&t, " reset steps done: CONTROL(0x86000005, 2)=");
++    wdog_put_error(&t, r.error);
++    wdog_put_str(&t, r.error ? " (still armed)" : " disabled the watchdog before PSCI");
++    ramoops_log_line(RAMOOPS_KIND_RESET, t.at);
++}
++
+ // A reset that returned left the phone in RamoopsLog's retry loop with the watchdog disabled (2026-10-30 18:35: a run that never
+ // came back needed a manual power + volume-down reset): the shortest bite, counted from the last pet before the reset, ends it.
+ void gunyah_wdog_after_failed_reset(void)
+--- a/drivers/BootProgress/BootProgress.c
++++ b/drivers/BootProgress/BootProgress.c
+@@ -1239,6 +1239,8 @@
+ static void start_reset_paths(void)
+ {
+     ramoops_log_start();
++    const char *seq = ramoops_reset_seq_status();   // pagani-reset-seq 0x100: the probe's answers, also on the screen
++    if (seq) boot_progress_stage(seq);
+     gunyah_wdog_start();
+     const char *wdog = gunyah_wdog_status();
+     if (wdog) boot_progress_stage(wdog);
+--- a/drivers/BootProgress/Test/ramoops.c
++++ b/drivers/BootProgress/Test/ramoops.c
+@@ -10,6 +10,7 @@
+ //   ./ramoops --dump DIR   also writes one run's two zone images and the records it wrote (gpu-test-loop decoder test)
+ #define RAMOOPS_LOG_TEST 1
+ #include <assert.h>
++#include <pthread.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
+@@ -32,7 +33,7 @@
+ static int64_t reset2_result = -2, reset_result = -1;
+ static char method_value[4] = "smc";
+ static int method_present = 1;
+-static struct { int hvc; uint64_t function, a, b, c; } calls[64];
++static struct { int hvc, masked; uint64_t function, a, b, c; } calls[64];   // masked: RamoopsLog's DAIF stand-in at the call
+ static unsigned call_count;
+ static uint64_t timer_ms;
+ static unsigned timer_arms;
+@@ -61,15 +62,35 @@
+ }
+ 
+ const char *ramoops_platform_boot_args(void) { return boot_args_text; }
+-uint64_t ramoops_platform_counter(void) { return clock_now += clock_step; }
++// The pagani-reset-seq CPU park answers late when park_due is set: the parked count appears once the counter passes it.
++static uint32_t *park_target, park_arrive;
++static uint64_t park_due;
++uint64_t ramoops_platform_counter(void)
++{
++    uint64_t now = __atomic_add_fetch(&clock_now, clock_step, __ATOMIC_RELAXED);
++    if (park_target && now >= park_due) { __atomic_store_n(park_target, park_arrive, __ATOMIC_RELEASE); park_target = NULL; }
++    return now;
++}
+ uint64_t ramoops_platform_frequency(void) { return HZ; }
+ 
++// Every firmware call in one order (PSCI, SCM, the CPU park as TRACE_PARK, the watchdog's hold for the steps and its release as
++// TRACE_HOLD and TRACE_RELEASE), so a test checks the sequence across them. The fakes take one lock: the concurrent-reset test
++// calls them from two threads.
++enum { TRACE_PARK = 0xa5a5, TRACE_HOLD = 0xb01d, TRACE_RELEASE = 0x0ff, TRACE_BITE = 0xb17e, TRACE_MAX = 512 };
++static pthread_mutex_t platform_lock = PTHREAD_MUTEX_INITIALIZER;
++static uint64_t trace[TRACE_MAX];
++static unsigned trace_count;
++static void trace_add(uint64_t what) { assert(trace_count < TRACE_MAX); trace[trace_count++] = what; }
++
+ int64_t ramoops_platform_psci(int hvc, uint64_t function, uint64_t a, uint64_t b, uint64_t c)
+ {
++    pthread_mutex_lock(&platform_lock);
+     assert(call_count < 64);
+-    calls[call_count].hvc = hvc; calls[call_count].function = function;
++    calls[call_count].hvc = hvc; calls[call_count].masked = host_daif_masked; calls[call_count].function = function;
+     calls[call_count].a = a; calls[call_count].b = b; calls[call_count].c = c;
+     call_count++;
++    trace_add(function);
++    pthread_mutex_unlock(&platform_lock);
+     switch (function) {
+     case 0x84000000: return (int64_t)psci_version_value;
+     case 0x8400000a: return a == 0xc4000012 ? (int64_t)(uint32_t)reset2_features_value : -1;
+@@ -79,6 +100,127 @@
+     }
+ }
+ 
++// ---- the SCM conduit and the CPU park of pagani-reset-seq ---------------------------------------------------------------
++// The firmware as far as the steps see it: the download mode register at 0x1fd9000 (IO_READ answers it, IO_WRITE stores into
++// it), SDI and the SPMI arbiter (each call recorded), IS_CALL_AVAIL (x1 from avail_x1 by the queried id), the OEM reboot
++// (returns oem_x0: on the phone it would not return). scm_fail sets x0 for one function id. scm_interrupts INTERRUPTED answers
++// come before each final one, each with a new x6 session that the continuation must send back with x0 = 1 and the request's
++// x1..x3 unchanged. smc_hook runs after the SMC of function smc_hook_function is answered (outside the lock).
++static struct { uint64_t x0, x1, x2, x3, x6; } smcs[TRACE_MAX];
++static unsigned smc_count, scm_interrupts, park_calls, park_signalled;
++static uint64_t dload_value, sdi_calls, arbiter_calls, oem_x0;
++static uint32_t scm_fail_function, smc_hook_function;
++static int64_t scm_fail_x0;
++static uint32_t avail_ids[8];
++static uint64_t avail_x1[8];
++static void (*smc_hook)(void);
++static uint64_t interrupted_function, interrupted_args[3], interrupted_session, session_counter;
++static unsigned interrupted_left;
++static uint32_t interrupt_only;            // scm_interrupts for this function id only (0: every call)
++static uint64_t read_x0_upper, read_x1_upper;   // IO_READ answers with these upper halves (Linux reads both as 32 bits)
++static int seq_expected;                   // a test that sets pagani-reset-seq: fresh() skips the zero-calls check
++
++void ramoops_platform_smc(uint64_t regs[8])
++{
++    pthread_mutex_lock(&platform_lock);
++    assert(smc_count < TRACE_MAX);
++    smcs[smc_count].x0 = regs[0]; smcs[smc_count].x1 = regs[1]; smcs[smc_count].x2 = regs[2];
++    smcs[smc_count].x3 = regs[3]; smcs[smc_count].x6 = regs[6];
++    smc_count++;
++    trace_add(regs[0]);
++    assert(!regs[4] && !regs[5] && !regs[7]);
++    uint64_t function = regs[0];
++    if (regs[0] == 1) {
++        // A continuation: the interrupted request's x1..x3 and the session it got back.
++        assert(interrupted_function && regs[1] == interrupted_args[0] && regs[2] == interrupted_args[1] &&
++               regs[3] == interrupted_args[2] && regs[6] == interrupted_session);
++        function = interrupted_function;
++    } else {
++        assert(!regs[6]);                  // a new request sends x6 = 0
++        interrupted_function = function; interrupted_left = !interrupt_only || interrupt_only == function ? scm_interrupts : 0;
++        interrupted_args[0] = regs[1]; interrupted_args[1] = regs[2]; interrupted_args[2] = regs[3];
++    }
++    if (interrupted_left) {
++        interrupted_left--;
++        regs[0] = 1;
++        regs[6] = interrupted_session = 0x5e55000 + ++session_counter;
++        pthread_mutex_unlock(&platform_lock);
++        return;
++    }
++    interrupted_function = 0;
++    int64_t x0 = 0;
++    uint64_t x1 = 0x77;                    // x1 of a call that returns nothing: never logged
++    const int fail = function == scm_fail_function;
++    switch (function) {
++    case 0xc2000501:
++        assert(regs[1] == 1);
++        if (regs[2] == 0x1fd9000) { x1 = dload_value | read_x1_upper; x0 = (int64_t)read_x0_upper; }
++        else x0 = -3;
++        break;
++    case 0xc2000502: assert(regs[1] == 2 && regs[2] == 0x1fd9000); if (!fail) dload_value = regs[3]; break;
++    case 0xc2000109: assert(regs[1] == 2 && regs[2] == 1 && regs[3] == 0); sdi_calls++; break;
++    case 0xc2000901: assert(regs[1] == 1 && regs[2] == 0); arbiter_calls++; break;
++    case 0xc3000922: assert(regs[1] == 0 && regs[2] == 0 && regs[3] == 0); x0 = (int64_t)oem_x0; break;
++    case 0x42000601:
++        assert(regs[1] == 1);
++        x1 = 0;
++        for (unsigned i = 0; i < 8; i++) if (avail_ids[i] == regs[2]) x1 = avail_x1[i];
++        break;
++    default: assert(0);
++    }
++    if (fail) x0 = scm_fail_x0;
++    regs[0] = (uint64_t)x0;
++    regs[1] = x1;
++    regs[2] = 0x2222; regs[3] = 0x3333;    // x2/x3 come back changed: never read
++    void (*hook)(void) = function == smc_hook_function ? smc_hook : NULL;
++    pthread_mutex_unlock(&platform_lock);
++    if (hook) hook();
++}
++
++unsigned ramoops_platform_park_others(uint32_t *parked)
++{
++    pthread_mutex_lock(&platform_lock);
++    park_calls++;
++    trace_add(TRACE_PARK);
++    pthread_mutex_unlock(&platform_lock);
++    if (!park_due) __atomic_store_n(parked, park_arrive, __ATOMIC_RELEASE);
++    else park_target = parked;
++    return park_signalled;
++}
++
++// The watchdog's side of a reset (GunyahWdog.c in the kernel, Test/gunyah-wdog.c tests it): pagani-reset-wdog's bite (answers
++// bite_answer: 1 when our watchdog is armed and bites), and with pagani-reset-seq each resetter's hold before anything else and the
++// release by the steps' CPU after them. hold_masked: the DAIF stand-in at the hold.
++static unsigned hold_calls, release_calls, bite_calls;
++static int hold_masked = -1, bite_answer;
++int ramoops_platform_wdog_bite(const char *reason)
++{
++    assert(reason);
++    pthread_mutex_lock(&platform_lock);
++    bite_calls++;
++    trace_add(TRACE_BITE);
++    pthread_mutex_unlock(&platform_lock);
++    return bite_answer;
++}
++int ramoops_platform_wdog_hold(const char *reason)
++{
++    assert(reason);
++    pthread_mutex_lock(&platform_lock);
++    hold_calls++;
++    hold_masked = host_daif_masked;
++    trace_add(TRACE_HOLD);
++    pthread_mutex_unlock(&platform_lock);
++    return 1;
++}
++void ramoops_platform_wdog_release(const char *reason)
++{
++    assert(reason);
++    pthread_mutex_lock(&platform_lock);
++    release_calls++;
++    trace_add(TRACE_RELEASE);
++    pthread_mutex_unlock(&platform_lock);
++}
++
+ int ramoops_platform_psci_method(char method[4])
+ {
+     if (!method_present) return 0;
+@@ -120,6 +262,17 @@
+ 
+ static void fresh(void)
+ {
++    // pagani-reset-seq absent (every test but the reset-seq ones): not a single SCM call, CPU park or watchdog hold happened since
++    // the last fresh(), whatever the scenario (timer, observer, backup timer, panic, headless panic, retries).
++    assert(seq_expected || (!smc_count && !park_calls && !hold_calls && !release_calls));
++    seq_expected = 0;
++    smc_count = 0; scm_interrupts = 0; park_calls = 0; park_signalled = 0; park_arrive = 0; park_due = 0; park_target = NULL;
++    interrupt_only = 0; read_x0_upper = 0; read_x1_upper = 0; hold_calls = 0; release_calls = 0; hold_masked = -1; host_daif_masked = 0; bite_calls = 0; bite_answer = 0;
++    dload_value = 0x20; sdi_calls = 0; arbiter_calls = 0; oem_x0 = (uint64_t)-1;
++    scm_fail_function = 0; scm_fail_x0 = 0; smc_hook = NULL; smc_hook_function = 0;
++    interrupted_function = 0; interrupted_left = 0; session_counter = 0;
++    for (unsigned i = 0; i < 8; i++) { avail_ids[i] = 0; avail_x1[i] = 0; }
++    trace_count = 0;
+     ramoops_log_suspend();
+     call_count = 0; timer_arms = 0; timer_ms = 0; maps = 0; clock_step = 1;
+     timer_cpu_value = 0; observer_cpu = 0; backup_cpu_armed = -1; backup_avoided = -2; backup_ms = 0; backup_calls = 0; backup_arms = 0;
+@@ -944,8 +1097,679 @@
+     unsigned n = read_all();
+     assert(!find(n, 'S', "dropped") && find(n, 'P', "P") && find(n, 'H', "drops 2"));
+     assert(find(n, 'W', "dropped 2 writes: the log lock was held too long"));
++}
++
++// ---- pagani-reset-seq -------------------------------------------------------------------------------------------------------
++enum { FN_IO_READ = 0xc2000501, FN_IO_WRITE = 0xc2000502, FN_SDI = 0xc2000109, FN_ARB = 0xc2000901, FN_OEM = 0xc3000922,
++       FN_AVAIL = 0x42000601, FN_VERSION = 0x84000000, FN_FEATURES = 0x8400000a, FN_RESET2 = 0xc4000012, FN_RESET = 0x84000009 };
++
++static void expect_trace(unsigned from, const uint64_t *ids, unsigned n)
++{
++    assert(from + n <= trace_count);
++    for (unsigned i = 0; i < n; i++) {
++        if (trace[from + i] == ids[i]) continue;
++        fprintf(stderr, "trace[%u] = %#llx, expected %#llx\n", from + i, (unsigned long long)trace[from + i],
++                (unsigned long long)ids[i]);
++        assert(0);
++    }
++}
++
++static unsigned trace_how_many(uint64_t id)
++{
++    unsigned n = 0;
++    for (unsigned i = 0; i < trace_count; i++) n += trace[i] == id;
++    return n;
++}
++
++// The boot-args the way the kernel command line carries the mask (taken only as written "0x" and hex digits).
++static char seq_args_text[192];
++static void seq_args(uint32_t mask)
++{
++    snprintf(seq_args_text, sizeof(seq_args_text), "-v serial=0 pagani-ramoops=1 pagani-reset-seq=%#x", mask);
++    boot_args_text = seq_args_text;
++}
++
++static void seq_setup(uint32_t mask, unsigned reset_after)
++{
++    fresh();
++    seq_expected = 1;
++    arg("pagani-ramoops", 1);
++    if (reset_after) arg("pagani-reset-after", reset_after);
++    arg("pagani-reset-seq", mask);
++    seq_args(mask);
++    assert(ramoops_log_vm_ready());
++}
++
++// The record after `r` (by sequence) has this kind and exactly this text.
++static const struct rec *next_is(const struct rec *r, char kind, const char *text)
++{
++    const struct rec *n = r + 1;
++    if (n->kind != kind || strcmp(n->text, text)) {
++        fprintf(stderr, "after \"%s\": %c \"%s\", expected %c \"%s\"\n", r->text, n->kind, n->text, kind, text);
++        assert(0);
++    }
++    return n;
++}
++
++static const uint32_t probe_ids[6] = {0x2000109, 0x2000110, 0x2000501, 0x2000502, 0x2000901, 0x3000922};
++
++// Every bit: the boot probe before the PSCI facts; at the timer the watchdog's hold first, then the steps in Linux's order between
++// the "reset reason" record and the PSCI reset, one U record each with the function id and x0, the hold's release right before
++// PSCI; a later trigger and the observer's late retry go straight to PSCI (the steps run once per boot).
++static void test_reset_seq_all(void)
++{
++    seq_setup(0x11f, 60);
++    park_signalled = 7; park_arrive = 7;
++    for (unsigned i = 0; i < 6; i++) { avail_ids[i] = probe_ids[i]; avail_x1[i] = i == 5 ? 0 : 1; }
++    assert(!strcmp(ramoops_log_status(), "ramoops on 0x880000000 copies 36 x 0xfffc; reset after 60 s; reset seq 0x11f"));
++    clock_now += 3 * (uint64_t)HZ;
++    ramoops_log_start();
++    static const uint64_t boot[] = {FN_AVAIL, FN_AVAIL, FN_AVAIL, FN_AVAIL, FN_AVAIL, FN_AVAIL, FN_IO_READ, FN_VERSION, FN_FEATURES};
++    expect_trace(0, boot, 9);
++    assert(trace_count == 9 && smc_count == 7 && timer_arms == 1 && !hold_calls);
++    for (unsigned i = 0; i < 6; i++) assert(smcs[i].x1 == 1 && smcs[i].x2 == probe_ids[i] && smcs[i].x3 == 0 && smcs[i].x6 == 0);
++    assert(smcs[6].x1 == 1 && smcs[6].x2 == 0x1fd9000);
++    assert(!strcmp(ramoops_reset_seq_status(), "reset seq 0x11f avail sdi 1 dl 1 rd 1 wr 1 spmi 1 oem 0 dload 0x20"));
++    ramoops_log_start();                             // started twice: one probe
++    assert(trace_count == 9);
++    unsigned n = read_all();
++    const struct rec *r = find(n, 'U', "reset seq probe: avail SCM 0x42000601(0x2000109) = 0 x1 0x1");
++    assert(r);
++    r = next_is(r, 'U', "reset seq probe: avail SCM 0x42000601(0x2000110) = 0 x1 0x1");
++    r = next_is(r, 'U', "reset seq probe: avail SCM 0x42000601(0x2000501) = 0 x1 0x1");
++    r = next_is(r, 'U', "reset seq probe: avail SCM 0x42000601(0x2000502) = 0 x1 0x1");
++    r = next_is(r, 'U', "reset seq probe: avail SCM 0x42000601(0x2000901) = 0 x1 0x1");
++    r = next_is(r, 'U', "reset seq probe: avail SCM 0x42000601(0x3000922) = 0 x1 0x0");
++    r = next_is(r, 'U', "reset seq probe: dload read SCM 0xc2000501(0x1fd9000) = 0 x1 0x20");
++    assert(find(n, 'B', "reset-after=60s panic-reset=0s reset-seq=0x11f"));
++    ramoops_log_putc('h'); ramoops_log_putc('i');    // the partial line still goes out before the reset
++    unsigned before = trace_count;
++    ramoops_log_timer_fired();
++    static const uint64_t steps[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI, FN_ARB, TRACE_PARK, FN_OEM,
++                                     TRACE_RELEASE, FN_RESET2, FN_RESET};
++    expect_trace(before, steps, 11);
++    assert(trace_count == before + 11 && dload_value == 0 && sdi_calls == 1 && arbiter_calls == 1 && park_calls == 1);
++    assert(hold_calls == 1 && release_calls == 1);
++    assert(smcs[8].x1 == 2 && smcs[8].x2 == 0x1fd9000 && smcs[8].x3 == 0);   // IO_WRITE(0x1fd9000, 0)
++    n = read_all();
++    r = find(n, 'C', "hi");
++    assert(r && r[1].kind == 'T' && !strncmp(r[1].text, "reset reason=timer up=", 22));
++    r = next_is(r + 1, 'T', "reset seq 0x11f (pagani-reset-seq) reason=timer: probe dload-clear sdi-off spmi-halt park-cpus "
++                            "oem-warm-reboot");
++    r = next_is(r, 'U', "reset seq: dload read SCM 0xc2000501(0x1fd9000) = 0 x1 0x20");
++    r = next_is(r, 'U', "reset seq: dload clear SCM 0xc2000502(0x1fd9000, 0x0) = 0");
++    r = next_is(r, 'U', "reset seq: dload read back SCM 0xc2000501(0x1fd9000) = 0 x1 0x0");
++    r = next_is(r, 'U', "reset seq: SDI off SCM 0xc2000109(0x1, 0x0) = 0");
++    r = next_is(r, 'U', "reset seq: SPMI arbiter halt SCM 0xc2000901(0x0) = 0");
++    r = next_is(r, 'U', "reset seq: park CPUs: 7 of 7 signalled CPUs parked in 0 ms");
++    r = next_is(r, 'U', "reset seq: OEM warm reboot SCM 0xc3000922() next");
++    r = next_is(r, 'U', "reset seq: OEM warm reboot returned: SCM 0xc3000922() = -1");
++    r = next_is(r, 'T', "reset seq done in 0 ms; resetting through PSCI");
++    r = next_is(r, 'T', "SYSTEM_RESET2 returned -2; trying SYSTEM_RESET");
++    r = next_is(r, 'T', "SYSTEM_RESET returned -1; retrying once a second, watchdog armed");
++    assert(r->seq == n);
++    // A second trigger (the backup timer, a late first timer, a panic): its hold (in GunyahWdog a no-op by then), PSCI; the
++    // observer's late retry: PSCI. Neither releases the watchdog.
++    before = trace_count;
++    ramoops_log_backup_timer_fired();
++    static const uint64_t again[] = {TRACE_HOLD, FN_RESET2, FN_RESET};
++    expect_trace(before, again, 3);
++    assert(trace_count == before + 3 && read_all() == n);
++    clock_now += 6 * (uint64_t)HZ;
++    ramoops_log_tick(1, 2, 3, 4);
++    assert(trace_count == before + 4 && trace[before + 3] == FN_RESET && smc_count == 13 && park_calls == 1);
++    assert(hold_calls == 2 && release_calls == 1);
+ }
+ 
++// Each bit alone does its own calls and nothing else, after the clear the steps that may make the reset warm bring with them (F1:
++// "implied" in the T and U records); the watchdog's hold comes first and its release right before PSCI.
++static void test_reset_seq_single(void)
++{
++    static const struct { uint32_t mask; unsigned calls; uint64_t ids[4]; const char *names; uint64_t dload; } cases[] = {
++        {0x1, 4, {FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI}, "dload-clear(implied) sdi-off", 0},
++        {0x2, 3, {FN_IO_READ, FN_IO_WRITE, FN_IO_READ}, "dload-clear", 0},
++        {0x4, 4, {FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_ARB}, "dload-clear(implied) spmi-halt", 0},
++        {0x8, 4, {FN_IO_READ, FN_IO_WRITE, FN_IO_READ, TRACE_PARK}, "dload-clear(implied) park-cpus", 0},
++        {0x10, 4, {FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_OEM}, "dload-clear(implied) oem-warm-reboot", 0},
++        {0x100, 1, {FN_IO_READ}, "probe", 0x20},
++    };
++    for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
++        seq_setup(cases[c].mask, 60);
++        park_signalled = 3; park_arrive = 3;
++        ramoops_log_start();
++        const unsigned probe = cases[c].mask == 0x100 ? 7 : 0;     // the boot probe's calls come first
++        assert(trace_count == probe + 2);
++        unsigned before = trace_count;
++        ramoops_log_timer_fired();
++        static const uint64_t hold[] = {TRACE_HOLD}, psci[] = {TRACE_RELEASE, FN_RESET2, FN_RESET};
++        expect_trace(before, hold, 1);
++        expect_trace(before + 1, cases[c].ids, cases[c].calls);
++        expect_trace(before + 1 + cases[c].calls, psci, 3);
++        assert(trace_count == before + cases[c].calls + 4 && hold_calls == 1 && release_calls == 1);
++        assert(sdi_calls == (cases[c].mask == 0x1) && arbiter_calls == (cases[c].mask == 0x4) && park_calls == (cases[c].mask == 0x8));
++        assert(dload_value == cases[c].dload);
++        char expected[128];
++        snprintf(expected, sizeof(expected), "reset seq %#x (pagani-reset-seq) reason=timer: %s", cases[c].mask, cases[c].names);
++        unsigned n = read_all();
++        const struct rec *r = find(n, 'T', expected);
++        assert(r && !strcmp(r->text, expected) && !strncmp(r[-1].text, "reset reason=timer up=", 22));
++        if (strstr(cases[c].names, "(implied)")) {
++            r = next_is(r, 'U', "reset seq: dload read (implied) SCM 0xc2000501(0x1fd9000) = 0 x1 0x20");
++            r = next_is(r, 'U', "reset seq: dload clear (implied) SCM 0xc2000502(0x1fd9000, 0x0) = 0");
++            next_is(r, 'U', "reset seq: dload read back (implied) SCM 0xc2000501(0x1fd9000) = 0 x1 0x0");
++        } else assert(!find(n, 'U', "(implied)"));
++        assert(find(n, 'T', "reset seq done in ") && !find(n, 'T', "not 0:"));
++    }
++    // pagani-reset-seq=0 is the same as absent: no call, no hold, no record, no status or boot record change.
++    fresh();
++    arg("pagani-ramoops", 1); arg("pagani-reset-after", 60); arg("pagani-reset-seq", 0);
++    seq_args(0);
++    assert(ramoops_log_vm_ready() && !strcmp(ramoops_log_status(), "ramoops on 0x880000000 copies 36 x 0xfffc; reset after 60 s"));
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    unsigned n = read_all();
++    assert(!smc_count && !park_calls && !hold_calls && find(n, 'B', "reset-after=60s panic-reset=0s") && !find(n, 'B', "reset-seq"));
++    assert(!find(n, 'T', "reset seq") && !find(n, 'U', "reset seq") && ramoops_reset_seq_status() == NULL);
++}
++
++// A call that fails, or stays INTERRUPTED, or CPUs that do not park: logged, and the next step and the PSCI reset still come; a
++// download mode that does not read back 0 skips the steps that may make the reset warm (F1).
++static void test_reset_seq_failures(void)
++{
++    // INTERRUPTED twice per call: continuations with x0 = 1, the request's x1..x3 and the returned x6; the final x0 is logged.
++    seq_setup(0x17, 60);
++    scm_interrupts = 2;
++    ramoops_log_start();
++    unsigned before = trace_count;
++    ramoops_log_timer_fired();
++    assert(smc_count == 6 * 3 && trace_count == before + 6 * 3 + 4);     // and the hold, the release, RESET2, RESET
++    for (unsigned k = 0; k < 6; k++) {
++        assert(smcs[3 * k].x0 != 1 && smcs[3 * k].x6 == 0);
++        for (unsigned j = 1; j < 3; j++) {
++            assert(smcs[3 * k + j].x0 == 1 && smcs[3 * k + j].x1 == smcs[3 * k].x1 && smcs[3 * k + j].x2 == smcs[3 * k].x2 &&
++                   smcs[3 * k + j].x3 == smcs[3 * k].x3 && smcs[3 * k + j].x6 == 0x5e55000 + 2 * k + j);
++        }
++    }
++    assert(smcs[0].x0 == FN_IO_READ && smcs[3].x0 == FN_IO_WRITE && smcs[9].x0 == FN_SDI && smcs[12].x0 == FN_ARB &&
++           smcs[15].x0 == FN_OEM && dload_value == 0 && sdi_calls == 1 && arbiter_calls == 1);
++    unsigned n = read_all();
++    assert(find(n, 'U', "reset seq: SDI off SCM 0xc2000109(0x1, 0x0) = 0") && find(n, 'U', "reset seq: dload read back SCM "
++                                                                                       "0xc2000501(0x1fd9000) = 0 x1 0x0"));
++
++    // Failures: SDI says NOT_SUPPORTED as a 32-bit -1 (x0's upper half clear), and the rest go on.
++    seq_setup(0x17, 60);
++    scm_fail_function = FN_SDI; scm_fail_x0 = (int64_t)0xffffffffLL;
++    ramoops_log_start();
++    before = trace_count;
++    ramoops_log_timer_fired();
++    static const uint64_t all[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI, FN_ARB, FN_OEM, TRACE_RELEASE, FN_RESET2,
++                                   FN_RESET};
++    expect_trace(before, all, 10);
++    n = read_all();
++    const struct rec *r = find(n, 'U', "reset seq: SDI off SCM 0xc2000109(0x1, 0x0) = -1");
++    assert(r && !strcmp(r->text, "reset seq: SDI off SCM 0xc2000109(0x1, 0x0) = -1"));
++    next_is(r, 'U', "reset seq: SPMI arbiter halt SCM 0xc2000901(0x0) = 0");
++    assert(find(n, 'T', "SYSTEM_RESET returned -1; retrying once a second, watchdog armed"));
++    // The download mode write refused (-4) while the mode is 0x20: the read back shows it, so SDI and the arbiter halt are skipped
++    // with one T record, and the reset goes on as without them.
++    seq_setup(0x7, 60);
++    scm_fail_function = FN_IO_WRITE; scm_fail_x0 = -4;
++    ramoops_log_start();
++    before = trace_count;
++    ramoops_log_timer_fired();
++    n = read_all();
++    r = find(n, 'U', "reset seq: dload clear SCM 0xc2000502(0x1fd9000, 0x0) = -4");
++    assert(r && dload_value == 0x20);
++    r = next_is(r, 'U', "reset seq: dload read back SCM 0xc2000501(0x1fd9000) = 0 x1 0x20");
++    r = next_is(r, 'T', "reset seq: the download mode reads back 0x20, not 0: sdi-off spmi-halt skipped (a warm reset would enter "
++                        "the crash dump)");
++    next_is(r, 'T', "reset seq done in 0 ms; resetting through PSCI");
++    static const uint64_t gated[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, TRACE_RELEASE, FN_RESET2, FN_RESET};
++    expect_trace(before, gated, 7);
++    assert(!sdi_calls && !arbiter_calls && call_count == 4 && trace_count == before + 7);
++    // The arbiter halt and the OEM reboot refused (the clear implied): logged, PSCI follows.
++    seq_setup(0x14, 60);
++    scm_fail_function = FN_ARB; scm_fail_x0 = -2; oem_x0 = (uint64_t)-4;
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    n = read_all();
++    assert(find(n, 'U', "reset seq: SPMI arbiter halt SCM 0xc2000901(0x0) = -2"));
++    assert(find(n, 'U', "reset seq: OEM warm reboot returned: SCM 0xc3000922() = -4") && call_count == 4 && dload_value == 0);
++    // SDI never stops being INTERRUPTED: 64 SMCs, logged as such, then the next step.
++    seq_setup(0x7, 60);
++    scm_interrupts = 1000; interrupt_only = FN_SDI;
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    assert(smc_count == 3 + 64 + 1 && trace_how_many(FN_RESET) == 1 && arbiter_calls == 1);
++    n = read_all();
++    r = find(n, 'U', "reset seq: SDI off SCM 0xc2000109(0x1, 0x0) = 1 (still INTERRUPTED after 64 SMCs)");
++    assert(r);
++    next_is(r, 'U', "reset seq: SPMI arbiter halt SCM 0xc2000901(0x0) = 0");
++    // Every call INTERRUPTED to the end: the implied clear never reads back 0, so SDI and the arbiter halt do not run at all.
++    seq_setup(0x5, 60);
++    scm_interrupts = 1000;
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    assert(smc_count == 3 * 64 && trace_how_many(FN_RESET) == 1 && !sdi_calls && !arbiter_calls);
++    n = read_all();
++    assert(find(n, 'U', "reset seq: dload read back (implied) SCM 0xc2000501(0x1fd9000) = 1 (still INTERRUPTED after 64 SMCs)"));
++    assert(find(n, 'T', "reset seq: the download mode reads back x0 1, not 0: sdi-off spmi-halt skipped"));
++    // CPUs: 5 of 7 park (two never answer): the wait ends after 1 s and the reset goes on.
++    seq_setup(0x18, 60);
++    park_signalled = 7; park_arrive = 5; clock_step = 1000;
++    ramoops_log_start();
++    uint64_t start = clock_now;
++    ramoops_log_timer_fired();
++    assert(clock_now - start >= (uint64_t)HZ && clock_now - start < 2ULL * HZ && trace_how_many(FN_OEM) == 1);
++    n = read_all();
++    r = find(n, 'U', "reset seq: park CPUs: 5 of 7 signalled CPUs parked in 1000 ms (gave up after 1 s)");
++    assert(r);
++    next_is(r, 'U', "reset seq: OEM warm reboot SCM 0xc3000922() next");
++    // They answer 200 ms late: the wait ends then. No other CPU at all: nothing to wait for.
++    seq_setup(0x8, 60);
++    park_signalled = 7; park_arrive = 7; clock_step = 1000;
++    ramoops_log_start();
++    park_due = clock_now + (uint64_t)HZ / 5;
++    ramoops_log_timer_fired();
++    n = read_all();
++    r = find(n, 'U', "reset seq: park CPUs: 7 of 7 signalled CPUs parked in ");
++    unsigned ms = 0;
++    assert(r && sscanf(r->text, "reset seq: park CPUs: 7 of 7 signalled CPUs parked in %u ms", &ms) == 1 && !strstr(r->text, "gave up"));
++    assert(ms >= 190 && ms <= 200 && !park_target);
++    seq_setup(0x8, 60);
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    assert(find(read_all(), 'U', "reset seq: park CPUs: 0 of 0 signalled CPUs parked in 0 ms"));
++    // The probe's failures on the screen line: e<x0>.
++    seq_setup(0x100, 0);
++    scm_fail_function = FN_AVAIL; scm_fail_x0 = -1;
++    ramoops_log_start();
++    assert(!strcmp(ramoops_reset_seq_status(),
++                   "reset seq 0x100 avail sdi e-1 dl e-1 rd e-1 wr e-1 spmi e-1 oem e-1 dload 0x20"));
++    assert(strlen(ramoops_reset_seq_status()) <= 79);   // a BootProgress stage line keeps 79 characters
++    seq_setup(0x100, 0);
++    scm_fail_function = FN_IO_READ; scm_fail_x0 = -3;
++    avail_ids[0] = 0x2000109; avail_x1[0] = 1;
++    ramoops_log_start();
++    assert(!strcmp(ramoops_reset_seq_status(), "reset seq 0x100 avail sdi 1 dl 0 rd 0 wr 0 spmi 0 oem 0 dload e-3"));
++    assert(find(read_all(), 'U', "reset seq probe: dload read SCM 0xc2000501(0x1fd9000) = -3"));
++}
++
++// F1: the steps that may make the reset warm, and pagani-reset-cold together with any bit, bring the download mode's clear with
++// them and run only when it reads back 0; the explicit clear (0x002) gates them the same way.
++static void cold_setup(uint32_t mask)
++{
++    fresh();
++    seq_expected = 1;
++    arg("pagani-ramoops", 1); arg("pagani-reset-after", 60); arg("pagani-reset-cold", 1); arg("pagani-reset-seq", mask);
++    seq_args(mask);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++}
++
++static void test_reset_seq_interlock(void)
++{
++    // The mode was 0 already and the write is refused: it reads back 0, so SDI goes out.
++    seq_setup(0x1, 60);
++    dload_value = 0; scm_fail_function = FN_IO_WRITE; scm_fail_x0 = -4;
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    unsigned n = read_all();
++    assert(sdi_calls == 1 && find(n, 'U', "reset seq: dload read back (implied) SCM 0xc2000501(0x1fd9000) = 0 x1 0x0"));
++    assert(find(n, 'U', "reset seq: dload clear (implied) SCM 0xc2000502(0x1fd9000, 0x0) = -4") && !find(n, 'T', "not 0:"));
++    // The read fails (-3): the mode is not known to be 0 (the write went through, but nothing shows it), so no SDI.
++    seq_setup(0x1, 60);
++    scm_fail_function = FN_IO_READ; scm_fail_x0 = -3;
++    ramoops_log_start();
++    unsigned before = trace_count;
++    ramoops_log_timer_fired();
++    static const uint64_t unread[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, TRACE_RELEASE, FN_RESET2, FN_RESET};
++    expect_trace(before, unread, 7);
++    assert(!sdi_calls && dload_value == 0 && trace_count == before + 7);
++    n = read_all();
++    const struct rec *r = find(n, 'U', "reset seq: dload read back (implied) SCM 0xc2000501(0x1fd9000) = -3");
++    assert(r);
++    next_is(r, 'T', "reset seq: the download mode reads back x0 -3, not 0: sdi-off skipped (a warm reset would enter the crash dump)");
++    // x0 and the value are judged on their low 32 bits, as Linux reads them: upper halves that are not 0 change nothing.
++    seq_setup(0x1, 60);
++    read_x0_upper = 0x100000000ULL; read_x1_upper = 0xdead00000000ULL;
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    n = read_all();
++    assert(sdi_calls == 1 && dload_value == 0 && !find(n, 'T', "not 0:"));
++    assert(find(n, 'U', "reset seq: dload read back (implied) SCM 0xc2000501(0x1fd9000) = 0") && find(n, 'U', "reset seq: SDI off"));
++    // The explicit clear gates the same way: 0x003 with the write refused runs no SDI.
++    seq_setup(0x3, 60);
++    scm_fail_function = FN_IO_WRITE; scm_fail_x0 = -4;
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    n = read_all();
++    assert(!sdi_calls && find(n, 'T', "reset seq 0x3 (pagani-reset-seq) reason=timer: dload-clear sdi-off"));
++    assert(find(n, 'T', "reset seq: the download mode reads back 0x20, not 0: sdi-off skipped") && !find(n, 'U', "(implied)"));
++    // pagani-reset-cold with the probe alone: the clear is implied and the reset is SYSTEM_RESET only, Android's single call.
++    cold_setup(0x100);
++    before = trace_count;
++    ramoops_log_timer_fired();
++    static const uint64_t cold[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, TRACE_RELEASE, FN_RESET};
++    expect_trace(before, cold, 6);
++    assert(trace_count == before + 6 && dload_value == 0 && !trace_how_many(FN_RESET2));
++    n = read_all();
++    r = find(n, 'T', "reset seq 0x100 (pagani-reset-seq) reason=timer: probe dload-clear(implied)");
++    assert(r && !strcmp(r->text, "reset seq 0x100 (pagani-reset-seq) reason=timer: probe dload-clear(implied)"));
++    assert(strstr(r[-1].text, "path=SYSTEM_RESET (0x84000009) (pagani-reset-cold)"));
++    r = next_is(r, 'U', "reset seq: dload read (implied) SCM 0xc2000501(0x1fd9000) = 0 x1 0x20");
++    r = next_is(r, 'U', "reset seq: dload clear (implied) SCM 0xc2000502(0x1fd9000, 0x0) = 0");
++    r = next_is(r, 'U', "reset seq: dload read back (implied) SCM 0xc2000501(0x1fd9000) = 0 x1 0x0");
++    r = next_is(r, 'T', "reset seq done in 0 ms; resetting through PSCI");
++    next_is(r, 'T', "SYSTEM_RESET returned -1; retrying once a second, watchdog armed");
++    // The same with the write refused: the mode reads back 0x20, so pagani-reset-cold is not applied: SYSTEM_RESET2 first as
++    // without it, for this resetter and a later one.
++    cold_setup(0x100);
++    scm_fail_function = FN_IO_WRITE; scm_fail_x0 = -4;
++    before = trace_count;
++    ramoops_log_timer_fired();
++    static const uint64_t warm[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, TRACE_RELEASE, FN_RESET2, FN_RESET};
++    expect_trace(before, warm, 7);
++    n = read_all();
++    r = find(n, 'T', "reset seq: the download mode reads back 0x20, not 0:");
++    assert(r && !strcmp(r->text, "reset seq: the download mode reads back 0x20, not 0: pagani-reset-cold skipped (a warm reset would "
++                                 "enter the crash dump)"));
++    assert(find(n, 'T', "SYSTEM_RESET2 returned -2; trying SYSTEM_RESET"));
++    before = trace_count;
++    ramoops_log_backup_timer_fired();
++    static const uint64_t later[] = {TRACE_HOLD, FN_RESET2, FN_RESET};
++    expect_trace(before, later, 3);
++    // Steps and pagani-reset-cold both skipped, named in one record.
++    cold_setup(0x11c);
++    scm_fail_function = FN_IO_WRITE; scm_fail_x0 = -4;
++    park_signalled = 3; park_arrive = 3;
++    ramoops_log_timer_fired();
++    assert(find(read_all(), 'T', "reads back 0x20, not 0: spmi-halt park-cpus oem-warm-reboot pagani-reset-cold skipped"));
++    assert(!arbiter_calls && !park_calls && !trace_how_many(FN_OEM) && trace_how_many(FN_RESET2) == 1);
++    // pagani-reset-cold without pagani-reset-seq: as before (SYSTEM_RESET only, not a single SCM call or hold).
++    fresh();
++    arg("pagani-ramoops", 1); arg("pagani-reset-after", 60); arg("pagani-reset-cold", 1);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++    before = trace_count;
++    ramoops_log_timer_fired();
++    assert(trace_count == before + 1 && trace[before] == FN_RESET && !smc_count && !hold_calls);
++}
++
++// S4: after 0x008 parked the other CPUs, interrupts stay masked up to the PSCI call (and after it: reset_retry), as Linux's
++// machine_restart; otherwise the resetting thread's own state comes back. The observer resets from thread context (interrupts on).
++static void test_reset_seq_irqs(void)
++{
++    static const struct { uint32_t mask; int masked; } cases[] = {{0x8, 1}, {0x1f, 1}, {0x1, 0}, {0x7, 0}, {0x100, 0}};
++    for (unsigned c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
++        seq_setup(cases[c].mask, 60);
++        park_signalled = 3; park_arrive = 3;
++        ramoops_log_start();
++        const unsigned from = call_count;
++        clock_now += 63 * (uint64_t)HZ;                      // past the deadline + 2 s, the timer never fired: the observer resets
++        assert(!host_daif_masked);
++        ramoops_log_tick(1, 2, 3, 4);
++        assert(reset_started && hold_masked == 0 && release_calls == 1 && host_daif_masked == cases[c].masked);
++        unsigned resets = 0;
++        for (unsigned i = from; i < call_count; i++) {
++            if (calls[i].function != FN_RESET2 && calls[i].function != FN_RESET) continue;
++            assert(calls[i].masked == cases[c].masked);
++            resets++;
++        }
++        assert(resets == 2 && find(read_all(), 'T', "reset reason=observer"));
++    }
++    // A park the download mode skipped (it reads back 0x20): nothing parked, the state comes back.
++    seq_setup(0x8, 60);
++    scm_fail_function = FN_IO_WRITE; scm_fail_x0 = -4;
++    ramoops_log_start();
++    clock_now += 63 * (uint64_t)HZ;
++    ramoops_log_tick(1, 2, 3, 4);
++    assert(!park_calls && !host_daif_masked && !calls[call_count - 1].masked);
++    // Without pagani-reset-seq: the observer's reset as before (interrupts as the thread had them).
++    fresh();
++    arg("pagani-ramoops", 1); arg("pagani-reset-after", 60);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++    clock_now += 63 * (uint64_t)HZ;
++    ramoops_log_tick(1, 2, 3, 4);
++    assert(reset_started && calls[call_count - 1].function == FN_RESET && !calls[call_count - 1].masked && !host_daif_masked);
++}
++
++// S5: the mask runs only as written "0x" and 1 to 8 hex digits (the last occurrence, the one XNU's parser keeps), read as that value,
++// with known bits only. Anything else refuses all of it: no probe, no hold, no step, the reset as without the boot-arg (fresh()
++// checks that no SCM call, park or hold happened); one T record at boot and the status line say so.
++static void test_reset_seq_refused(void)
++{
++    static const struct { const char *args; uint32_t parsed; const char *record; } refused[] = {
++        // XNU: "0X10F" is no number, so its first three characters come back as bytes ('0', 'X', '1', NUL).
++        {"-v pagani-reset-seq=0X10F pagani-ramoops=1", 0x00315830, "pagani-reset-seq=0X10F read as 0x315830: unknown bits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=all", 0x006c6c61, "pagani-reset-seq=all read as 0x6c6c61: unknown bits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0101", 0x41, "pagani-reset-seq=0101 read as 0x41: unknown bits"},   // octal
++        {"-v pagani-ramoops=1 pagani-reset-seq=010", 0x8,
++         "pagani-reset-seq=010 read as 0x8: not written as 0x and 1 to 8 hex digits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=271", 0x10f,
++         "pagani-reset-seq=271 read as 0x10f: not written as 0x and 1 to 8 hex digits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0b1", 0x1, "pagani-reset-seq=0b1 read as 0x1: not written as 0x and 1 to 8 hex digits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq", 0x1,
++         "pagani-reset-seq (no value) read as 0x1: not written as 0x and 1 to 8 hex digits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x100000001", 0x1,
++         "pagani-reset-seq=0x100000001 read as 0x1: not written as 0x and 1 to 8 hex digits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x00000001f", 0x1f,
++         "pagani-reset-seq=0x00000001f read as 0x1f: not written as 0x and 1 to 8 hex digits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x1k", 0x400, "pagani-reset-seq=0x1k read as 0x400: unknown bits"},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x80000001", 0x80000001, "pagani-reset-seq=0x80000001 read as 0x80000001: unknown bits"},
++        // The last occurrence counts (XNU's too): a good first one does not help a bad last one.
++        {"-v pagani-reset-seq=0x1 pagani-ramoops=1 pagani-reset-seq=0X1", 0x00315830,
++         "pagani-reset-seq=0X1 read as 0x315830: unknown bits"},
++        // The text and the parsed value disagree (not from XNU's parser; refused all the same).
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x2", 0x1, "pagani-reset-seq=0x2 read as 0x1: parsed as another value"},
++        {"-v pagani-ramoops=1", 0x1, "pagani-reset-seq (not in the boot-args) read as 0x1: not written as 0x and 1 to 8 hex digits"},
++    };
++    for (unsigned c = 0; c < sizeof(refused) / sizeof(refused[0]); c++) {
++        fresh();
++        arg("pagani-ramoops", 1); arg("pagani-reset-after", 60); arg("pagani-reset-seq", refused[c].parsed);
++        boot_args_text = refused[c].args;
++        assert(ramoops_log_vm_ready());
++        char status[160];
++        snprintf(status, sizeof(status), "ramoops on 0x880000000 copies 36 x 0xfffc; reset after 60 s; reset seq REFUSED %#x",
++                 refused[c].parsed);
++        assert(!strcmp(ramoops_log_status(), status) && !reset_seq_mask && reset_seq_refused == refused[c].parsed);
++        ramoops_log_start();
++        unsigned before = trace_count;
++        ramoops_log_timer_fired();
++        static const uint64_t plain[] = {FN_RESET2, FN_RESET};
++        expect_trace(before, plain, 2);
++        assert(trace_count == before + 2 && ramoops_reset_seq_status() == NULL);
++        unsigned n = read_all();
++        char record[320];
++        snprintf(record, sizeof(record), "reset seq refused: %s; none of it runs (write the mask as 0x and 1 to 8 hex digits)",
++                 refused[c].record);
++        const struct rec *r = find(n, 'T', "reset seq refused: ");
++        assert(r && !strcmp(r->text, record));
++        assert(!find(n, 'T', "reset seq 0x") && !find(n, 'U', "reset seq") && !find(n, 'B', "reset-seq"));
++    }
++    // Written right: hex digits in either case after a lowercase 0x, leading zeros, the last of several occurrences.
++    static const struct { const char *args; uint32_t mask; } accepted[] = {
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x10F", 0x10f},
++        {"-v pagani-ramoops=1 pagani-reset-seq=0x00000001", 0x1},
++        {"-v pagani-reset-seq=0X1 pagani-ramoops=1 pagani-reset-seq=0x1", 0x1},
++        {"-v pagani-ramoops=1\tpagani-reset-seq=0x100", 0x100},
++    };
++    for (unsigned c = 0; c < sizeof(accepted) / sizeof(accepted[0]); c++) {
++        fresh();
++        seq_expected = 1;
++        arg("pagani-ramoops", 1); arg("pagani-reset-after", 60); arg("pagani-reset-seq", accepted[c].mask);
++        boot_args_text = accepted[c].args;
++        assert(ramoops_log_vm_ready() && reset_seq_mask == accepted[c].mask && !reset_seq_refused);
++        ramoops_log_start();
++        ramoops_log_timer_fired();
++        assert(hold_calls == 1 && release_calls == 1 && !find(read_all(), 'T', "refused"));
++    }
++    // The log off: nothing runs, the status line says why; also when nothing else is configured.
++    fresh();
++    arg("pagani-reset-after", 30); arg("pagani-reset-seq", 0x00315830);
++    boot_args_text = "-v pagani-reset-seq=0X10F";
++    assert(!ramoops_log_vm_ready() && !strcmp(ramoops_log_status(), "ramoops off; reset after 30 s; reset seq REFUSED 0x315830"));
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    assert(maps == 0 && trace_how_many(FN_RESET) == 1);
++    fresh();
++    arg("pagani-reset-seq", 0x41);
++    boot_args_text = "-v pagani-reset-seq=0101";
++    assert(!ramoops_log_vm_ready() && !strcmp(ramoops_log_status(), "ramoops off; reset seq REFUSED 0x41"));
++    ramoops_log_start();
++    assert(!timer_arms && !call_count);
++}
++
++// Once per boot with resetters that overlap: a second resetter that comes while the steps run waits for them (at most 2 s), then
++// resets through PSCI without running them; two threads resetting at once run them exactly once between them. Each resetter asks
++// for the watchdog's hold; only the one that ran the steps releases it.
++static uint64_t nested_waited;
++static void nested_reset(void)
++{
++    uint64_t start = clock_now;
++    ramoops_log_backup_timer_fired();
++    nested_waited = clock_now - start;
++}
++
++static volatile int race_go;
++static void *race_reset(void *param)
++{
++    const int which = *(const int *)param;
++    while (!__atomic_load_n(&race_go, __ATOMIC_ACQUIRE)) {}
++    if (which) ramoops_log_backup_timer_fired();
++    else ramoops_log_timer_fired();
++    return NULL;
++}
++
++static void test_reset_seq_once(void)
++{
++    // The backup timer fires on another CPU while the first timer's SDI call is out: it waits (the steps stay RUNNING
++    // until the first resetter returns here, so the full 2 s), resets through PSCI, and the first resetter goes on.
++    seq_setup(0x7, 60);
++    clock_step = 1000;
++    smc_hook_function = FN_SDI; smc_hook = nested_reset;
++    ramoops_log_start();
++    unsigned before = trace_count;
++    ramoops_log_timer_fired();
++    static const uint64_t order[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI, TRACE_HOLD, FN_RESET2, FN_RESET, FN_ARB,
++                                     TRACE_RELEASE, FN_RESET2, FN_RESET};
++    expect_trace(before, order, 12);
++    assert(trace_count == before + 12 && smc_count == 5 && nested_waited >= 2ULL * HZ && nested_waited < 3ULL * HZ);
++    assert(reset_seq_state == RESET_SEQ_DONE && hold_calls == 2 && release_calls == 1);
++    unsigned n = read_all();
++    assert(find(n, 'T', "reset seq done in 2") && find(n, 'U', "reset seq: SPMI arbiter halt SCM 0xc2000901(0x0) = 0"));
++    // A panic after the timed reset ran the steps: none again.
++    before = trace_count;
++    ramoops_log_panic_reset();                       // no panic wait configured beyond the deadline: 5 s at least
++    assert(trace_count == before + 3 && trace[before] == TRACE_HOLD && trace[before + 1] == FN_RESET2 && smc_count == 5);
++    assert(release_calls == 1);
++    // Two threads: the timer and the backup timer at the same moment. Exactly one runs the steps.
++    for (int round = 0; round < 64; round++) {
++        seq_setup(0x1f, 60);
++        park_signalled = 2; park_arrive = 2;
++        ramoops_log_start();
++        before = trace_count;
++        pthread_t threads[2];
++        int which[2] = {0, 1};
++        race_go = 0;
++        for (int i = 0; i < 2; i++) assert(!pthread_create(&threads[i], NULL, race_reset, &which[i]));
++        __atomic_store_n(&race_go, 1, __ATOMIC_RELEASE);
++        for (int i = 0; i < 2; i++) assert(!pthread_join(threads[i], NULL));
++        assert(sdi_calls == 1 && arbiter_calls == 1 && park_calls == 1 && smc_count == 6);
++        assert(trace_how_many(FN_IO_WRITE) == 1 && trace_how_many(FN_OEM) == 1 && hold_calls == 2 && release_calls == 1);
++        assert(trace_how_many(FN_RESET2) == 2 && trace_how_many(FN_RESET) == 2 && trace_count == before + 14);
++        n = read_all();
++        unsigned starts = 0;
++        for (unsigned i = 0; i < n; i++) starts += records[i].kind == 'T' && !strncmp(records[i].text, "reset seq 0x1f ", 15);
++        assert(starts == 1 && reset_seq_state == RESET_SEQ_DONE);
++    }
++}
++
++// The panic paths reset through the same steps (reason=panic); the watchdog-bite path applies none of them (and releases nothing);
++// with the log off the steps still run (no records).
++static void test_reset_seq_paths(void)
++{
++    fresh();
++    seq_expected = 1;
++    arg("pagani-ramoops", 1); arg("pagani-panic-reset", 2); arg("pagani-reset-seq", 0x5);
++    seq_args(0x5);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++    for (const char *p = "OnePlus 13T / XNU PANIC\nMESSAGE\nKernel data abort."; *p; p++) ramoops_log_panic_putc(*p);
++    clock_step = 100000;
++    unsigned before = trace_count;
++    ramoops_log_panic_reset();
++    static const uint64_t panic_steps[] = {TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI, FN_ARB, TRACE_RELEASE, FN_RESET2,
++                                           FN_RESET};
++    expect_trace(before, panic_steps, 9);
++    unsigned n = read_all();
++    const struct rec *r = find(n, 'T', "panic: reset in 2000 ms");
++    assert(r && !strncmp(r[1].text, "reset reason=panic", 18));
++    next_is(r + 1, 'T', "reset seq 0x5 (pagani-reset-seq) reason=panic: dload-clear(implied) sdi-off spmi-halt");
++    // A panic without a screen: the same.
++    fresh();
++    seq_expected = 1;
++    arg("pagani-ramoops", 1); arg("pagani-panic-reset", 1); arg("pagani-reset-seq", 0x1);
++    seq_args(0x1);
++    assert(ramoops_log_vm_ready());
++    ramoops_log_start();
++    clock_step = 100000;
++    headless("no screen %u", 7U);
++    assert(sdi_calls == 1 && trace_how_many(FN_RESET) == 1 && release_calls == 1);
++    assert(find(read_all(), 'T', "reset seq 0x1 (pagani-reset-seq) reason=panic: dload-clear(implied) sdi-off"));
++    // The watchdog-bite path (pagani-reset-wdog=1 and our watchdog armed: the bite resets): no hold, no step, no release, one T
++    // record; PSCI comes only 10 s later in the kernel (at once on the host). Not armed (the bite call answers 0): the steps as usual.
++    for (int armed = 1; armed >= 0; armed--) {
++        fresh();
++        seq_expected = 1;
++        arg("pagani-ramoops", 1); arg("pagani-reset-after", 60); arg("pagani-reset-wdog", 1); arg("pagani-reset-seq", 0x7);
++        seq_args(0x7);
++        assert(ramoops_log_vm_ready());
++        ramoops_log_start();
++        bite_answer = armed;
++        before = trace_count;
++        ramoops_log_timer_fired();
++        static const uint64_t bitten[] = {TRACE_BITE, FN_RESET2, FN_RESET};
++        static const uint64_t steps[] = {TRACE_BITE, TRACE_HOLD, FN_IO_READ, FN_IO_WRITE, FN_IO_READ, FN_SDI, FN_ARB, TRACE_RELEASE,
++                                         FN_RESET2, FN_RESET};
++        if (armed) expect_trace(before, bitten, 3);
++        else expect_trace(before, steps, 10);
++        assert(trace_count == before + (armed ? 3 : 10) && bite_calls == 1);
++        assert(armed ? !smc_count && !hold_calls && !release_calls && reset_seq_state == RESET_SEQ_IDLE : sdi_calls == 1);
++        n = read_all();
++        assert(!find(n, 'T', "; first the watchdog bite (pagani-reset-wdog)") == !armed);
++        assert(!find(n, 'T', "reset seq 0x7 not applied: the watchdog bite resets (pagani-reset-wdog)") == !armed);
++    }
++    // The same through reset_seq itself: a later resetter does not wait.
++    seq_setup(0x7, 60);
++    ramoops_log_start();
++    reset_seq("timer", 1, 1);
++    assert(!smc_count && !release_calls && reset_seq_state == RESET_SEQ_IDLE);
++    assert(find(read_all(), 'T', "reset seq 0x7 not applied: the watchdog bite resets (pagani-reset-wdog)"));
++    uint64_t start = clock_now;
++    reset_seq("backup timer", 0, 1);
++    assert(clock_now - start < 10 && !smc_count);
++    // The reset configured without the log: the steps run all the same, nothing is recorded (nothing is mapped).
++    fresh();
++    seq_expected = 1;
++    arg("pagani-reset-after", 30); arg("pagani-reset-seq", 0x3);
++    seq_args(0x3);
++    assert(!ramoops_log_vm_ready() && !strcmp(ramoops_log_status(), "ramoops off; reset after 30 s; reset seq 0x3"));
++    ramoops_log_start();
++    ramoops_log_timer_fired();
++    assert(maps == 0 && smc_count == 4 && sdi_calls == 1 && dload_value == 0 && trace_how_many(FN_RESET) == 1);
++    assert(hold_calls == 1 && release_calls == 1);
++    // The probe alone, nothing else configured: it still asks at boot (the screen line), and nothing resets.
++    fresh();
++    seq_expected = 1;
++    arg("pagani-reset-seq", 0x100);
++    seq_args(0x100);
++    assert(!ramoops_log_vm_ready() && ramoops_log_status() == NULL);
++    ramoops_log_start();
++    assert(smc_count == 7 && call_count == 0 && timer_arms == 0 && ramoops_reset_seq_status() != NULL && !hold_calls);
++}
++
+ // One realistic run for the decoder test: boot records, a few thousand console lines (the console ring wraps), process
+ // stages, GPU rows, a panic screen and the reset path. expected.tsv lists the records the copies still hold.
+ static void dump(const char *directory)
+@@ -1025,7 +1849,18 @@
+     test_panic();
+     test_headless();
+     test_contention();
++    // The decoder test's run before the pagani-reset-seq tests: its zone images (run id included: it comes from the counter)
++    // stay byte for byte those of the code before pagani-reset-seq.
+     if (argc == 3 && !strcmp(argv[1], "--dump")) dump(argv[2]);
++    test_reset_seq_all();
++    test_reset_seq_single();
++    test_reset_seq_failures();
++    test_reset_seq_interlock();
++    test_reset_seq_irqs();
++    test_reset_seq_refused();
++    test_reset_seq_once();
++    test_reset_seq_paths();
++    fresh();
+     free(region); free(records);
+     puts("PASS: ramoops records and CRC32, Linux-valid zone headers (start 0, whole zone), 36 identical copies of 0xfffc "
+          "(4 + 32) with their layout 3 headers, copy size and limit rules, boot area / events ring / console ring routing, "
+@@ -1033,6 +1868,16 @@
+          "and observer fallback, panic and headless panic reset, lock contention, frame-rate F/J records with the slow frame's "
+          "breakdown, heartbeat CPU clock (rate arithmetic, best window, window bounds), zone headers stamped again on the heartbeat "
+          "and before a reset, the second reset timer (armed once on the observer's first CPU other than the first timer's, "
+-         "deadline + 3 s, straight to PSCI after the first timer, none without pagani-reset-after)");
++         "deadline + 3 s, straight to PSCI after the first timer, none without pagani-reset-after); pagani-reset-seq: no SCM "
++         "call or CPU park in any scenario without it (or =0), the boot probe (IS_CALL_AVAIL x6, the download mode) and its "
++         "screen line, each bit alone, all bits in Linux's order between the reset reason and PSCI with one U record per call "
++         "(function id, arguments, x0), INTERRUPTED continuations (x0 = 1, the returned x6), failures and endless INTERRUPTED "
++         "logged and passed over, CPUs that park late or never (1 s), the download mode's clear implied by every step that may "
++         "make the reset warm and by pagani-reset-cold, those skipped (pagani-reset-cold too) unless it reads back 0, the "
++         "watchdog's hold before the steps and its release right before PSCI by the steps' CPU only, interrupts kept masked "
++         "to the reset after the CPU park only, masks refused unless written 0x and 1 to 8 hex digits with known bits (XNU's "
++         "0X, word, octal, decimal, binary, bare and overlong forms; the last occurrence), once per boot (later triggers, the "
++         "observer's retry, a nested resetter that waits 2 s, two racing threads x64), the panic and headless panic paths, the "
++         "watchdog-bite path (none), the log off");
+     return 0;
+ }
+--- a/drivers/BootProgress/Test/console.c
++++ b/drivers/BootProgress/Test/console.c
+@@ -60,20 +60,42 @@
+ // The persistent log on a host buffer in place of the Android ramoops region; this test runs it with pagani-ramoops=1 only.
+ static uint8_t ramoops_region[RAMOOPS_LOG_DEFAULT_CONSOLE + RAMOOPS_LOG_DEFAULT_PMSG];
+ static uint64_t ramoops_clock;
++static uint32_t console_reset_seq;          // pagani-reset-seq, set by the probe's stage line test only
++static unsigned console_smcs;
+ uintptr_t ramoops_platform_map(uint64_t pa, uint64_t bytes, int device)
+ { assert(pa == RAMOOPS_LOG_DEFAULT_PA && bytes == sizeof(ramoops_region) && !device); return (uintptr_t)ramoops_region; }
+ int ramoops_platform_arg(const char *name, void *value, unsigned bytes)
+-{ if (strcmp(name, "pagani-ramoops") || bytes != 4) return 0; *(uint32_t *)value = 1; return 1; }
+-const char *ramoops_platform_boot_args(void) { return "-v pagani-ramoops=1"; }
++{
++    if (console_reset_seq && !strcmp(name, "pagani-reset-seq") && bytes == 4) { *(uint32_t *)value = console_reset_seq; return 1; }
++    if (strcmp(name, "pagani-ramoops") || bytes != 4) return 0;
++    *(uint32_t *)value = 1;
++    return 1;
++}
++const char *ramoops_platform_boot_args(void)
++{
++    assert(!console_reset_seq || console_reset_seq == 0x100);
++    return console_reset_seq ? "-v pagani-ramoops=1 pagani-reset-seq=0x100" : "-v pagani-ramoops=1";
++}
+ uint64_t ramoops_platform_counter(void) { return ramoops_clock += 1000; }
+ uint64_t ramoops_platform_frequency(void) { return 19200000; }
++// No PSCI either, but for the probe's stage line test, where PSCI_VERSION finds nothing (no reset is configured there).
+ int64_t ramoops_platform_psci(int hvc, uint64_t function, uint64_t a, uint64_t b, uint64_t c)
+-{ (void)hvc; (void)function; (void)a; (void)b; (void)c; assert(0); return -1; }
++{ (void)hvc; (void)a; (void)b; (void)c; assert(console_reset_seq && function == 0x84000000); return -1; }
+ int ramoops_platform_psci_method(char method[4]) { (void)method; return 0; }
+ int ramoops_platform_arm_timer(uint64_t milliseconds) { (void)milliseconds; assert(0); return -1; }
+ int ramoops_platform_arm_backup_timer(uint64_t milliseconds, int avoid) { (void)milliseconds; (void)avoid; assert(0); return -1; }
+ void ramoops_platform_ram(uint64_t *base, uint64_t *bytes) { *base = 0x8c0000000ULL; *bytes = 1ULL << 32; }
+ uint32_t ramoops_platform_cpu_mhz(int *cpu) { *cpu = 5; return 4320; }    // the heartbeat's CPU clock (CpuClock.h in the kernel)
++// pagani-reset-seq only in the probe's stage line test (Test/ramoops.c covers the rest): IS_CALL_AVAIL says yes, the download mode
++// reads 0x20. A CPU park fails the test.
++void ramoops_platform_smc(uint64_t regs[8])
++{
++    assert(console_reset_seq);
++    console_smcs++;
++    regs[1] = regs[0] == 0xc2000501 ? 0x20 : 1;
++    regs[0] = 0;
++}
++unsigned ramoops_platform_park_others(uint32_t *parked) { (void)parked; assert(0); return 0; }
+ // GunyahWdog stays off here (no pagani-wdog): a hypervisor call, a pet thread or a heartbeat fails the test (Test/gunyah-wdog.c
+ // covers the watchdog itself).
+ static unsigned wdog_platform_calls;
+@@ -871,11 +893,25 @@
+         assert(cpu_row == 0 && cpu_seq == 0 && cpu_drawn_seq == 0 && cpu_status[0] == 0);
+         free(before);
+     }
++    // pagani-reset-seq=0x100: when the reset paths start, the probe's answers become a stage line (the screen's history and an S
++    // record in the persistent log).
++    {
++        early_boot_progress_init(&args);
++        console_reset_seq = 0x100;
++        early_boot_progress_vm_ready();
++        start_reset_paths();
++        const char *line = "reset seq 0x100 avail sdi 1 dl 1 rd 1 wr 1 spmi 1 oem 1 dload 0x20";
++        assert(console_smcs == 7 && !strcmp(stages[(stage_count - 1) % HISTORY], line));
++        assert(ramoops_seen(" S reset seq 0x100 avail sdi 1 dl 1 rd 1 wr 1 spmi 1 oem 1 dload 0x20\n"));
++        assert(ramoops_seen(" U reset seq probe: dload read SCM 0xc2000501(0x1fd9000) = 0 x1 0x20\n"));
++        console_reset_seq = 0;
++        early_boot_progress_init(&args);
++    }
+     free(tables); free(allocation);
+     assert(!wdog_platform_calls);   // the panics, exceptions and observer rounds above left the watchdog alone
+     puts("PASS: framebuffer/map bounds, write-combined alias kept on rebind, root state, panic formatting, truncation, first-fault "
+          "retention, frozen observer, copy statistics, display frames, GPU and display probe status band, FPS and SLOW rows (row 8: the "
+          "slowest frame's breakdown, fallbacks, empty client waits, the stuck stage), frame-rate log with F/J breakdowns, heartbeat CPU "
+-         "clock, CPU row (row 14 or 19, cut to 65, redrawn on change, band, removal, panic)");
++         "clock, CPU row (row 14 or 19, cut to 65, redrawn on change, band, removal, panic), the pagani-reset-seq probe's stage line");
+     return 0;
+ }
+--- a/drivers/BootProgress/Test/crash.c
++++ b/drivers/BootProgress/Test/crash.c
+@@ -46,6 +46,12 @@
+ int ramoops_platform_arm_timer(uint64_t milliseconds) { (void)milliseconds; return 0; }
+ int ramoops_platform_arm_backup_timer(uint64_t milliseconds, int avoid) { (void)milliseconds; (void)avoid; return -1; }
+ void ramoops_platform_ram(uint64_t *base, uint64_t *bytes) { *base = 0x8c0000000ULL; *bytes = 0x100000000ULL; }
++// No pagani-reset-seq or pagani-reset-wdog here: an SCM call, a CPU park or a watchdog call fails the test.
++void ramoops_platform_smc(uint64_t regs[8]) { (void)regs; assert(0); }
++unsigned ramoops_platform_park_others(uint32_t *parked) { (void)parked; assert(0); return 0; }
++int ramoops_platform_wdog_bite(const char *reason) { (void)reason; assert(0); return 0; }
++int ramoops_platform_wdog_hold(const char *reason) { (void)reason; assert(0); return 0; }
++void ramoops_platform_wdog_release(const char *reason) { (void)reason; assert(0); }
+ 
+ // ---- simulated user memory and mappings ---------------------------------------------------------------------------------
+ struct block { uint64_t base; uint32_t bytes; uint8_t *data; };
+--- a/drivers/BootProgress/Test/gunyah-wdog.c
++++ b/drivers/BootProgress/Test/gunyah-wdog.c
+@@ -525,7 +525,87 @@
+     gunyah_wdog_start();
+     assert(gunyah_wdog_bite_reset("timer") == 0 && !ncalls && !hyp.enabled);
+ }
++
++// pagani-reset-seq (RamoopsLog's reset with steps): PET, then the shortest bite, pets stopped, left armed; a second resetter and the
++// plain reset's call change nothing; the steps' CPU disables it before PSCI (once); a returned PSCI re-arms as without the steps. A
++// step that never returns: the bite 4 s after the hold's pet, even when the last pet is long past. Not ours, or disabled by a panic
++// that RamoopsLog resets after: nothing.
++static void test_hold_for_steps(void)
++{
++    boot();
++    set_args("pagani-wdog", 30, NULL, 0, NULL, 0);
++    gunyah_wdog_start();
++    struct sim s;
++    sim_start(&s);
++    run(&s, 100000);
++    unsigned before = ncalls;
++    assert(gunyah_wdog_hold_for_steps("timer") == 1);
++    expect_call(before, 0x86000007, 0, 0);                  // the pet first: the bite counts from now
++    expect_call(before + 1, 0x86000008, 2000, 4000);
++    assert(ncalls == before + 2 && hyp.enabled && hyp.last_pat == now_ticks && hyp.bark == 2000 && hyp.bite == 4000);
++    assert(logged('T', "wdog: timer reset: pets stopped, PET(0x86000007)=0 SET_TIME(0x86000008, bark 2000, bite 4000)=0: armed "
++                       "through the reset steps (pagani-reset-seq)"));
++    run(&s, 101000);                                         // a second of steps: the pet thread, heartbeat and observer pet no more
++    assert(count_calls(GUNYAH_WDOG_FN_PET, before + 1) == 0 && s.thread_done && s.beat_done && !hyp.bitten);
++    assert(gunyah_wdog_hold_for_steps("backup timer") == 2);
++    gunyah_wdog_before_reset("backup timer");
++    assert(ncalls == before + 2 && hyp.enabled);
++    gunyah_wdog_release_hold("timer");
++    gunyah_wdog_release_hold("timer");
++    assert(ncalls == before + 3);
++    expect_call(before + 2, 0x86000005, 2, 0);
++    assert(!hyp.enabled && logged('T', "wdog: timer reset steps done: CONTROL(0x86000005, 2)=0 disabled the watchdog before PSCI"));
++    run(&s, 200000);
++    assert(!hyp.bitten && ncalls == before + 3);
++    gunyah_wdog_after_failed_reset();                        // the PSCI reset returned: the shortest bite, no pets
++    expect_call(before + 3, 0x86000008, 2000, 4000);
++    expect_call(before + 4, 0x86000005, 3, 0);
++    run(&s, 210000);
++    assert(hyp.bitten && ncalls == before + 5);
+ 
++    // A step that never returns (no release). The observer is the resetting thread: it stopped 20 s before, so the pets were
++    // withheld and the last one is 17 s old; the hold's pet makes the bite come 4 s after the hold, not at once.
++    boot();
++    set_args("pagani-wdog", 30, NULL, 0, NULL, 0);
++    gunyah_wdog_start();
++    sim_start(&s);
++    run(&s, 100000);
++    s.observer = 0;
++    run(&s, 120000);
++    assert(!hyp.bitten && now_ticks - hyp.last_pat > MS(15000) && logged('T', "wdog: pets withheld"));
++    before = ncalls;
++    assert(gunyah_wdog_hold_for_steps("observer") == 1);
++    run(&s, 130000);
++    assert(hyp.bitten && hyp.bite_at == MS(124000) && count_calls(GUNYAH_WDOG_FN_PET, before + 1) == 0);
++
++    // Not ours (pagani-wdog absent): nothing.
++    boot();
++    set_args("pagani-wdog", 0, NULL, 0, NULL, 0);
++    gunyah_wdog_start();
++    assert(gunyah_wdog_hold_for_steps("timer") == 0);
++    gunyah_wdog_release_hold("timer");
++    assert(!ncalls && !nlines && !hyp.enabled);
++    // Disabled by a panic that RamoopsLog resets after: nothing to hold or release.
++    boot();
++    set_args("pagani-wdog", 20, NULL, 0, NULL, 0);
++    gunyah_wdog_start();
++    sim_start(&s);
++    run(&s, 30000);
++    panic_footer_text = "RESET IN 20 s; log kept in ramoops";
++    gunyah_wdog_panic();
++    before = ncalls;
++    assert(!hyp.enabled && gunyah_wdog_hold_for_steps("panic") == 0);
++    gunyah_wdog_release_hold("panic");
++    assert(ncalls == before && !hyp.enabled);
++    // The pagani-reset-wdog bite settled it first: a hold changes nothing.
++    boot();
++    set_args("pagani-wdog", 30, NULL, 0, NULL, 0);
++    gunyah_wdog_start();
++    assert(gunyah_wdog_bite_reset("timer") == 1);
++    before = ncalls;
++    assert(gunyah_wdog_hold_for_steps("backup timer") == 2 && ncalls == before && hyp.enabled);
++}
++
+ // Without our watchdog (pagani-wdog absent) a returned reset arms nothing.
+ static void test_failed_reset_without_wdog(void)
+ {
+@@ -667,6 +747,7 @@
+     test_alive();
+     test_panic();
+     test_before_reset();
++    test_hold_for_steps();
+     test_failed_reset_without_wdog();
+     test_bite_reset();
+     test_clamp_and_hvc();
+@@ -677,6 +758,8 @@
+            "(1 s cadence), a hang bites at last pet + bite, disabled before a reset and before a panic reset, armed after a "
+            "panic without reset, stop-pet test, off when pagani-wdog=0 or absent; boot CPU heartbeat: no pet unless it and "
+            "the observer ran within 3 s (wedged boot CPU or stuck observer: the bite on time), pets resume after a short "
+-           "stall, an idle boot CPU and late wakes under 3 s are no hang, no observer: the heartbeat alone\n");
++           "stall, an idle boot CPU and late wakes under 3 s are no hang, no observer: the heartbeat alone; pagani-reset-seq: "
++           "held armed through the reset steps (PET, then the shortest bite; a hang bites 4 s after the hold), released before "
++           "PSCI once, nothing when not ours or after a panic or the bite path\n");
+     return 0;
+ }

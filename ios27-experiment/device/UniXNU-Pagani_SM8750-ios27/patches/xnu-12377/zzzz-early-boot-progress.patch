@@ -1,0 +1,243 @@
+zzzz-early-boot-progress.patch（xnu-12377 版）
+
+来源：本项目 UniXNU-Pagani_SM8750-gpu/patches/xnu/zzzz-early-boot-progress.patch（10063）。
+处理：手工移植，17 块里 5 块失败后按 12377 重写：
+- start.s 的 _start：12377 多了 ARM64_PROLOG，分支改在它之后。
+- arm_init.c：12377 没有 arm_setup_pre_sign()，early_boot_progress_arm_init() 放在
+  arm_slide_rebase_and_sign_image() 之前；arm_vm_init 前后两个钩子照旧。
+- sleh.c：12377 的 handle_kernel_abort 没有“Unexpected abort while on interrupt stack”这个 panic，
+  静态区判断改写，多了 physmap 判断。这几处都在 panic 前补上 boot_progress_kernel_exception。
+作用：MMU 打开前后就在屏幕上显示阶段，早期异常进 Entry.S 的 Lfatal。上机看不到东西就全靠它。
+依赖：
+- start.o 要有 -DXNU_EARLY_BOOT_PROGRESS，我方 build-xnu-4k-baseline.sh 有（558、812 行），上游现行脚本没有。
+- BootProgress.c、Entry.S 不动，但要重编成 arm64e；V=P 根表的变化见 pagani-27-early-progress-t0sz.patch。
+
+diff --git a/osfmk/arm/arm_init.c b/osfmk/arm/arm_init.c
+index 72d3561..f0ead36 100644
+--- a/osfmk/arm/arm_init.c
++++ b/osfmk/arm/arm_init.c
+@@ -1,3 +1,4 @@
++#include <kern/early_boot_progress.h>
+ #include <kern/boot_progress.h>
+ /*
+  * Copyright (c) 2007-2024 Apple Inc. All rights reserved.
+@@ -357,6 +358,7 @@ arm_init(
+ 	DTEntry chosen = NULL;
+ 	unsigned int dt_entry_size = 0;
+ 
++	early_boot_progress_arm_init();
+ 	arm_slide_rebase_and_sign_image();
+ 
+ 	arm_static_if_init(args);
+@@ -582,7 +584,9 @@ arm_init(
+ 	pmap_first_pnum = (ppnum_t)atop(gDramBase);
+ 
+ 	boot_progress_stage("arm_vm_init enter");
++	early_boot_progress_suspend();
+ 	arm_vm_init(xmaxmem, args);
++	early_boot_progress_vm_ready();
+ 	boot_progress_stage("arm_vm_init returned");
+ 
+ 	if (debug_boot_arg) {
+diff --git a/osfmk/arm64/sleh.c b/osfmk/arm64/sleh.c
+index d6fff49..29e3ff2 100644
+--- a/osfmk/arm64/sleh.c
++++ b/osfmk/arm64/sleh.c
+@@ -1,3 +1,4 @@
++#include <kern/early_boot_progress.h>
+ #include <kern/boot_progress.h>
+ /*
+  * Copyright (c) 2012-2023 Apple Inc. All rights reserved.
+@@ -671,6 +672,7 @@ sleh_synchronous_sp1(arm_context_t *context, uint64_t esr, vm_offset_t far __unu
+ {
+ 	esr_exception_class_t  class = ESR_EC(esr);
+ 	arm_saved_state_t    * state = &context->ss;
++	boot_progress_kernel_exception(esr, get_saved_state_pc(state), far);
+ 
+ 	switch (class) {
+ 	case ESR_EC_UNCATEGORIZED:
+@@ -2567,6 +2569,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
+ 			}
+ 			return;
+ 		} else {
++			boot_progress_kernel_exception(esr, get_saved_state_pc(state), fault_addr);
+ 			panic_with_thread_kernel_state("Unexpected page fault under dtrace_probe", state);
+ 		}
+ 	}
+@@ -2645,9 +2648,11 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
+ 		 * when running with KTRR.
+ 		 */
+ 		if (__improbable(fault_addr >= physmap_base) && (fault_addr < physmap_end)) {
++			boot_progress_kernel_exception(esr, get_saved_state_pc(state), fault_addr);
+ 			panic_with_thread_kernel_state("Unexpected fault in kernel physical aperture", state);
+ 		}
+ 		if (__improbable(fault_addr >= gVirtBase && fault_addr < static_memory_end)) {
++			boot_progress_kernel_exception(esr, get_saved_state_pc(state), fault_addr);
+ 			panic_with_thread_kernel_state("Unexpected fault in kernel static region", state);
+ 		}
+ 
+@@ -2724,6 +2729,7 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
+ 			handle_kernel_abort_recover(state, esr, fault_addr, thread, recover);
+ 			return;
+ 		}
++		boot_progress_kernel_exception(esr, get_saved_state_pc(state), fault_addr);
+ 		panic_with_thread_kernel_state("Unaligned kernel data abort.", state);
+ 	} else if (is_parity_error(fault_code)) {
+ #if defined(APPLE_ARM64_ARCH_FAMILY)
+@@ -2731,12 +2737,15 @@ handle_kernel_abort(arm_saved_state_t *state, uint64_t esr, vm_offset_t fault_ad
+ 		 * Platform errors are handled in sleh_sync before interrupts are enabled.
+ 		 */
+ #else
++		boot_progress_kernel_exception(esr, get_saved_state_pc(state), fault_addr);
+ 		panic_with_thread_kernel_state("Kernel parity error.", state);
+ #endif
+ 	} else {
+ 		kprintf("Unclassified kernel abort (fault_code=0x%x)\n", fault_code);
+ 	}
+ 
++	boot_progress_kernel_exception(esr, get_saved_state_pc(state), fault_addr);
++
+ 	panic_with_thread_kernel_state("Kernel data abort.", state);
+ }
+ 
+diff --git a/osfmk/arm64/start.s b/osfmk/arm64/start.s
+index a0a7ca0..ac6de50 100644
+--- a/osfmk/arm64/start.s
++++ b/osfmk/arm64/start.s
+@@ -232,7 +232,11 @@ LEXT(ResetHandlerData)
+ 	.globl EXT(_start)
+ LEXT(_start)
+ 	ARM64_PROLOG
++#if XNU_EARLY_BOOT_PROGRESS
++	b EXT(early_boot_progress_entry)
++#else
+ 	b	EXT(start_first_cpu)
++#endif
+ 
+ 
+ /*
+@@ -481,8 +485,13 @@ LEXT(start_first_cpu)
+ 	mov		x21, #0
+ 
+ 	// Set low reset vector before attempting any loads
++#if XNU_EARLY_BOOT_PROGRESS
++	adrp x0, EXT(early_boot_progress_vectors)@page
++	add x0, x0, EXT(early_boot_progress_vectors)@pageoff
++#else
+ 	adrp	x0, EXT(LowExceptionVectorBase)@page
+ 	add		x0, x0, EXT(LowExceptionVectorBase)@pageoff
++#endif
+ 	MSR_VBAR_EL1_X0
+ 
+ 
+@@ -632,6 +641,24 @@ Lbootstrap_tables_exhausted:
+ 	// the early debugger rather than corrupting memory or forging a map.
+ 	b Lbootstrap_tables_exhausted
+ Lbootstrap_tables_ready:
++#if XNU_EARLY_BOOT_PROGRESS
++	// start_first_cpu has selected virtual stacks before enabling the MMU.
++	mov x27, sp
++	mov x28, lr
++	adrp x9, EXT(early_boot_progress_stack)@page
++	add x9, x9, EXT(early_boot_progress_stack)@pageoff
++	add x9, x9, #4096
++	mov sp, x9
++	mov x0, x25
++	add x1, x2, #PGBYTES
++	add x2, x25, #(BOOTSTRAP_TABLE_BYTES >> 12), lsl #12
++	bl EXT(early_boot_progress_map)
++	cbnz x0, 1f
++	brk #0xe01
++1:
++	mov lr, x28
++	mov sp, x27
++#endif
+ 	/* Ensure TTEs are visible */
+ 	dsb		ish
+ 
+@@ -748,10 +775,17 @@ common_start:
+ 
+ 	cbnz		x21, 1f
+ #endif /* __ARM_KERNEL_PROTECT__ */
++#if XNU_EARLY_BOOT_PROGRESS
++	adrp x0, EXT(early_boot_progress_vectors)@page
++	add x0, x0, EXT(early_boot_progress_vectors)@pageoff
++#else
+ 	adrp	x0, EXT(ExceptionVectorsBase)@page			// Load exception vectors base address
+ 	add		x0, x0, EXT(ExceptionVectorsBase)@pageoff
++#endif
++#if !XNU_EARLY_BOOT_PROGRESS
+ 	add		x0, x0, x22									// Convert exception vector address to KVA
+ 	sub		x0, x0, x23
++#endif
+ 1:
+ 	MSR_VBAR_EL1_X0
+ 
+@@ -770,6 +804,28 @@ common_start:
+ 	bne		.
+ #endif /* !VMAPPLE */
+ 
++#if XNU_EARLY_BOOT_PROGRESS
++	cbnz x21, Lsecondary_progress_vectors
++	adrp x0, EXT(early_boot_progress_vectors)@page
++	add x0, x0, EXT(early_boot_progress_vectors)@pageoff
++	add x0, x0, x22
++	sub x0, x0, x23
++	msr VBAR_EL1, x0
++	isb
++	mov x28, lr
++	bl EXT(early_boot_progress_mmu_on)
++	mov lr, x28
++	b Lprogress_vectors_ready
++Lsecondary_progress_vectors:
++	adrp x0, EXT(ExceptionVectorsBase)@page
++	add x0, x0, EXT(ExceptionVectorsBase)@pageoff
++	add x0, x0, x22
++	sub x0, x0, x23
++	msr VBAR_EL1, x0
++	isb
++Lprogress_vectors_ready:
++#endif
++
+ #if (!CONFIG_KERNEL_INTEGRITY || (CONFIG_KERNEL_INTEGRITY && !defined(KERNEL_INTEGRITY_WT)))
+ 	/* Watchtower
+ 	 *
+diff --git a/osfmk/kern/Makefile b/osfmk/kern/Makefile
+index f295db6..1757253 100644
+--- a/osfmk/kern/Makefile
++++ b/osfmk/kern/Makefile
+@@ -138,6 +138,7 @@ PRIVATE_EXPORT_FILES = \
+ 
+ 
+ XNU_ONLY_EXPORTS = \
++	early_boot_progress.h \
+ 	boot_progress.h \
+ 	arcade.h \
+ 	btlog.h \
+diff --git a/osfmk/kern/early_boot_progress.h b/osfmk/kern/early_boot_progress.h
+new file mode 100644
+index 0000000..503cc5b
+--- /dev/null
++++ b/osfmk/kern/early_boot_progress.h
+@@ -0,0 +1,21 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#ifndef XNU_EARLY_BOOT_PROGRESS_H
++#define XNU_EARLY_BOOT_PROGRESS_H
++#include <stdint.h>
++#if defined(XNU_EARLY_BOOT_PROGRESS) && XNU_EARLY_BOOT_PROGRESS
++struct boot_args;
++void early_boot_progress_init(struct boot_args *);
++int early_boot_progress_map(uint64_t *, uintptr_t, uintptr_t);
++void early_boot_progress_mmu_on(void);
++void early_boot_progress_arm_init(void);
++void early_boot_progress_suspend(void);
++void early_boot_progress_vm_ready(void);
++void early_boot_progress_fatal(struct boot_args *, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
++void boot_progress_kernel_exception(uint64_t, uint64_t, uint64_t);
++#else
++#define early_boot_progress_arm_init() ((void)0)
++#define early_boot_progress_suspend() ((void)0)
++#define early_boot_progress_vm_ready() ((void)0)
++#define boot_progress_kernel_exception(...) ((void)0)
++#endif
++#endif

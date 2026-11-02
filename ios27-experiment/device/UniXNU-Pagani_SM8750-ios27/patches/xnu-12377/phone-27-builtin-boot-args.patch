@@ -1,0 +1,49 @@
+phone-27-builtin-boot-args.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 99、100 块（bootargs.c）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，工程便利。
+作用：PE_builtin_boot_args 弱定义为空串，板级可以把常开的参数编进内核，命令行里同名参数优先。
+13T 的命令行长期贴近 DarwinBoot 的 1023 字节上限。27 的参数更多。
+
+diff --git a/pexpert/gen/bootargs.c b/pexpert/gen/bootargs.c
+index 1ef8caa..36275ba 100644
+--- a/pexpert/gen/bootargs.c
++++ b/pexpert/gen/bootargs.c
+@@ -188,13 +188,23 @@ gotit:
+ 	return arg_found;
+ }
+ 
++/*
++ * UniXNU: boot arguments a board builds into its kernel, the switches it always sets, so the boot
++ * loader's command line (DarwinBoot keeps at most 1023 bytes) carries only what changes between
++ * boots. An argument on the command line wins; one absent from it is looked up here (a switch the
++ * board sets is turned off with name=0 on the command line). A board that defines none gets this
++ * empty one.
++ */
++__attribute__((weak)) char PE_builtin_boot_args[] = "";
++
+ boolean_t
+ PE_parse_boot_argn(
+ 	const char      *arg_string,
+ 	void            *arg_ptr,
+ 	int                     max_len)
+ {
+-	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE);
++	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, max_len, FALSE) ||
++	       PE_parse_boot_argn_internal(PE_builtin_boot_args, arg_string, arg_ptr, max_len, FALSE);
+ }
+ 
+ boolean_t
+@@ -214,7 +224,8 @@ PE_parse_boot_arg_str(
+ 	char            *arg_ptr,
+ 	int                     strlen)
+ {
+-	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE);
++	return PE_parse_boot_argn_internal(PE_boot_args(), arg_string, arg_ptr, strlen, TRUE) ||
++	       PE_parse_boot_argn_internal(PE_builtin_boot_args, arg_string, arg_ptr, strlen, TRUE);
+ }
+ 
+ #if defined(CONFIG_XNUPOST)

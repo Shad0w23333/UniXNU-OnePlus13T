@@ -1,0 +1,14 @@
+--- drivers/PaganiPanel/Test/panel-power.cpp	2026-10-31 17:34:54
++++ ../new/drivers/PaganiPanel/Test/panel-power.cpp	2026-10-31 17:35:32
+@@ -104,9 +104,9 @@
+         a.boot(); b.boot();
+         auto ia = a.io(), ib = b.io();
+         const uint8_t command = k == 0 ? 0x28 : k == 1 ? 0x29 : 0x51;
+-        const uint8_t level[3] = {0x51, 0x99, 0x05};
++        const uint8_t level[3] = {0x51, 0x05, 0x99};
+         CHECK(!dsi_panel_command(&ia, command, k == 2 ? 0x599 : 0));
+-        CHECK(!(k == 2 ? dsi_panel_packet(&ib, 0x39, level, 3) : dsi_panel_packet(&ib, 0x05, &command, 1)));
++        CHECK(!(k == 2 ? dsi_panel_packet_mode(&ib, 0x39, level, 3, 0) : dsi_panel_packet_mode(&ib, 0x05, &command, 1, 0)));
+         CHECK(a.writes == b.writes && a.waited == b.waited);
+     }
+     // Refusals before any write: unknown type, wrong lengths, no payload, DSI off or TPG busy (-19), the engine busy for 20 ms (-16).

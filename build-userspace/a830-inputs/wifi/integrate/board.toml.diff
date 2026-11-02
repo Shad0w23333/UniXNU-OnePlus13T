@@ -1,0 +1,24 @@
+--- a/UniXNU-Pagani_SM8750-gpu/board.toml
++++ b/UniXNU-Pagani_SM8750-gpu/board.toml
+@@ -18,7 +18,7 @@
+ # Adreno830 is the A830 kernel GPU driver (local source: local.toml or --local-module driver:Adreno830=../Adreno830).
+ # AdrenoMetal is selected from the start: the staged accelerator compiles against its OriginalAcceleratorABI.h; it is a
+ # payload-stage component and adds nothing to the kernel archives.
+-include = ["BootProgress", "NativeAES", "NativeKeyStoreEvents", "NativeMobileDisplay", "NativeRamBlock", "NativeUfs", "NativeVirtioBlock", "PaganiArmCpu", "PaganiArmDTPlatform", "PaganiDarwinBoot", "ShengPlatformPower", "Stage7Probe", "NativePrelink", "PaganiVerifiedRoot", "Sm8750Platform", "PaganiInput", "PaganiPanel", "QcomGeniSpi", "Adreno830", "AdrenoMetal", "PaganiAdsp", "PaganiAudio", "PaganiBattery", "PaganiHaptics"]
++include = ["BootProgress", "NativeAES", "NativeKeyStoreEvents", "NativeMobileDisplay", "NativeRamBlock", "NativeUfs", "NativeVirtioBlock", "PaganiArmCpu", "PaganiArmDTPlatform", "PaganiDarwinBoot", "ShengPlatformPower", "Stage7Probe", "NativePrelink", "PaganiVerifiedRoot", "Sm8750Platform", "PaganiInput", "PaganiPanel", "QcomGeniSpi", "Adreno830", "AdrenoMetal", "PaganiAdsp", "PaganiAudio", "PaganiBattery", "PaganiHaptics", "PaganiWifi"]
+ 
+ [kernel]
+ config_fragments = ["arch:configs/common.config", "soc:configs/sm8750.config", "os:configs/ipados.config"]
+@@ -51,7 +51,11 @@
+   "component:PaganiBattery",
+   # The vibrator (pagani-haptics=1; 2 dry run; default off), appended to the A830 archive the same way; Stage7Probe calls
+   # pagani_haptics_start after the audio service.
+-  "component:PaganiHaptics"
++  "component:PaganiHaptics",
++  # The Wi-Fi (pagani-wifi=1..6, default off: 1 survey, 2 power, 3 link, 4 endpoint, 5 firmware + own MHI boot, 6 the Ath12kWifi
++  # stack and the network service), appended to the A830 archive like the others; Stage7Probe calls pagani_wifi_start after the
++  # battery and haptics starts. Its firmware is read in place (modem_a) or from the RAM Data seed, never put in the image.
++  "component:PaganiWifi"
+ ]
+ 
+ [kernel.prelink]

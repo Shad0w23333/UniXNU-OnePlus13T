@@ -1,0 +1,13 @@
+--- drivers/Stage7Probe/Stage7Probe.cpp	2026-10-31 17:34:54
++++ ../new/drivers/Stage7Probe/Stage7Probe.cpp	2026-10-31 17:42:58
+@@ -104,7 +104,9 @@
+             if (ready) startPeripheral(pagani_input_allocate(true),"S3910 touch started",PAGANI_TOUCH);
+         }
+     }
+-    if (enabled("pagani-panel")) {
++    // pagani-panel is a bit mask since the brightness work: bit 0 runs the panel service, the others are PaganiPanel's own (PaganiPanel.cpp).
++    unsigned panel=0;PE_parse_boot_argn("pagani-panel",&panel,sizeof panel);
++    if (panel&1) {
+         kern_return_t loaded=OSKextLoadKextWithIdentifier("com.apple.driver.AppleARMPlatform");
+         progress("AppleARMPlatform load",(uint32_t)loaded);
+         bool ready=!loaded && registerClass(pagani_panel_static_init);

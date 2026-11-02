@@ -1,0 +1,166 @@
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    cpus {
+        #address-cells = <2>;
+        #size-cells = <0>;
+        timebase-frequency = <19200000>;
+        cpu0: cpu@0 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0>;
+            status = "disabled";
+        };
+        cpu1: cpu@100 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x100>;
+            status = "disabled";
+        };
+        cpu2: cpu@200 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x200>;
+            status = "disabled";
+        };
+        cpu3: cpu@300 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x300>;
+            status = "disabled";
+        };
+        cpu4: cpu@400 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x400>;
+            status = "disabled";
+        };
+        cpu5: cpu@500 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x500>;
+            status = "disabled";
+        };
+        cpu6: cpu@10000 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x10000>;
+            status = "disabled";
+        };
+        cpu7: cpu@10100 {
+            device_type = "cpu";
+            compatible = "arm,armv8";
+            reg = <0 0x10100>;
+            status = "disabled";
+        };
+    };
+    psci {
+        compatible = "arm,psci-1.0";
+        method = "smc";
+    };
+    soc {
+        compatible = "simple-bus";
+        #address-cells = <2>;
+        #size-cells = <2>;
+        ranges;
+        gic: interrupt-controller@16000000 {
+            compatible = "arm,gic-v3";
+            unixnu,adt-name = "intc";
+            interrupt-controller;
+            #interrupt-cells = <3>;
+            #address-cells = <0>;
+            reg = <0 0x16000000 0 0x10000>, <0 0x16080000 0 0x200000>;
+            redistributor-stride = <0 0x40000>;
+        };
+        gcc: clock-controller@100000 {
+            compatible = "qcom,sm8750-gcc";
+            reg = <0 0x100000 0 0x1f4200>;
+            #clock-cells = <1>;
+            status = "disabled";
+        };
+        ufs: ufs@1d84000 {
+            compatible = "qcom,sm8750-ufshc";
+            reg = <0 0x1d84000 0 0x3000>;
+            status = "disabled";
+        };
+        smmu: iommu@15000000 {
+            compatible = "qcom,sm8750-smmu-500";
+            reg = <0 0x15000000 0 0x100000>;
+            #iommu-cells = <1>;
+            status = "disabled";
+        };
+        gpu: gpu@3d00000 {
+            compatible = "qcom,adreno-gpu-gen8-0-1", "qcom,kgsl-3d0";
+            reg = <0 0x3d00000 0 0x40000>,
+                  <0 0x3d50000 0 0x10000>,
+                  <0 0x3d61000 0 0x3000>,
+                  <0 0x3d9e000 0 0x2000>;
+            reg-names = "kgsl_3d0_reg_memory", "rscc", "cx_dbgc", "cx_misc";
+            interrupt-parent = <&gic>;
+            interrupts = <0 300 4>, <0 80 4>;
+            interrupt-names = "kgsl_3d0_irq", "cx_host_irq";
+            /* gfx3d_user (SID 0) and gfx3d_lpac (SID 1) of the runtime DT kgsl-iommu children */
+            iommus = <&gpu_smmu 0 0>, <&gpu_smmu 1 0>;
+            nvmem-cells = <&gpu_speed_bin>;
+            nvmem-cell-names = "speed_bin";
+            status = "disabled";
+        };
+        gmu: gmu@3d37000 {
+            compatible = "qcom,gen8-gmu";
+            reg = <0 0x3d37000 0 0x68000>, <0 0x3d40000 0 0x10000>;
+            reg-names = "gmu", "gmu_ao_blk_dec0";
+            interrupt-parent = <&gic>;
+            interrupts = <0 304 4>, <0 305 4>;
+            interrupt-names = "hfi", "gmu";
+            iommus = <&gpu_smmu 5 0>;
+            status = "disabled";
+        };
+        gpucc: clock-controller@3d90000 {
+            compatible = "qcom,sun-gpucc", "syscon";
+            reg = <0 0x3d90000 0 0x9800>;
+            #clock-cells = <1>;
+            #power-domain-cells = <1>;
+            #reset-cells = <1>;
+            status = "disabled";
+        };
+        gpu_smmu: iommu@3da0000 {
+            compatible = "qcom,qsmmu-v500", "qcom,adreno-smmu";
+            reg = <0 0x3da0000 0 0x40000>;
+            #iommu-cells = <2>;
+            dma-coherent;
+            /* One global fault interrupt (SPI 674), then the 25 context banks in bank order (runtime DT kgsl-smmu). */
+            #global-interrupts = <1>;
+            interrupt-parent = <&gic>;
+            interrupts = <0 674 4>,
+                         <0 678 4>, <0 679 4>, <0 680 4>, <0 681 4>, <0 682 4>,
+                         <0 683 4>, <0 684 4>, <0 685 4>, <0 686 4>, <0 687 4>,
+                         <0 688 4>, <0 422 4>, <0 476 4>, <0 574 4>, <0 575 4>,
+                         <0 576 4>, <0 577 4>, <0 660 4>, <0 662 4>, <0 665 4>,
+                         <0 666 4>, <0 667 4>, <0 669 4>, <0 670 4>, <0 700 4>;
+            status = "disabled";
+        };
+        qfprom: efuse@221c8000 {
+            compatible = "qcom,sm8750-qfprom", "qcom,qfprom";
+            reg = <0 0x221c8000 0 0x1000>;
+            #address-cells = <1>;
+            #size-cells = <1>;
+            read-only;
+            status = "disabled";
+            gpu_speed_bin: gpu-speed-bin@138 {
+                reg = <0x138 0x2>;
+                bits = <0 9>;
+            };
+        };
+        llcc: cache-controller@24800000 {
+            compatible = "qcom,sm8750-llcc";
+            reg = <0 0x24800000 0 0x200000>, <0 0x25800000 0 0x200000>,
+                  <0 0x24c00000 0 0x200000>, <0 0x25c00000 0 0x200000>,
+                  <0 0x26800000 0 0x200000>, <0 0x26c00000 0 0x200000>;
+            reg-names = "llcc0_base", "llcc1_base", "llcc2_base", "llcc3_base",
+                        "llcc_broadcast_or_base", "llcc_broadcast_and_base";
+            interrupt-parent = <&gic>;
+            interrupts = <0 266 4>;
+            status = "disabled";
+        };
+    };
+};

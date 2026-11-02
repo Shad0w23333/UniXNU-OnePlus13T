@@ -1,0 +1,51 @@
+pagani-audio-addon-mount.patch（xnu-12377 版）
+
+来源：本项目 UniXNU-Pagani_SM8750-gpu/patches/xnu/pagani-audio-addon-mount.patch（10063）。
+处理：手工移植。原补丁的上下文来自 phone-wallpaper-collections 和 phone-keyboard-layouts，
+这两个推迟后上下文不存在，改挂在 12377 的壁纸挂载之后。boot_progress_trace 的 weak 声明原来由
+phone-keyboard-layouts 提供，现在随本补丁给出。
+替代关系：sheng 的 zzyd-sheng-audio-addon-mount.patch 做同一件事（ShengAudio.driver，scratch 0xa00），不移植。
+路径可信度：sheng 在 24A446 上就挂在 /System/Library/Audio/Plug-Ins/HAL，哨兵 BuiltinAudioPlugin.driver 相同【读码】。
+待办：PaganiAudio.driver 的 HAL 要重编 arm64e（sheng 记录里 dlsym 返回已签名指针，音频时钟取法要改）。
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index a7f9c82..d8c7531 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -8158,6 +8158,11 @@ volatile int native_gpu_addon2_stage = 0;
+ volatile int native_gpu_addon2_status = -1;
+ volatile int native_gpu_addon3_stage = 0;
+ volatile int native_gpu_addon3_status = -1;
++/* The OnePlus 13T audio overlay (pagani-audio-addon-mount.patch): stage and status, as for the addons above. */
++volatile int native_audio_addon_stage = 0;
++volatile int native_audio_addon_status = -1;
++/* BootProgress's ramoops trace (U lines), on boards that link it. */
++extern void boot_progress_trace(const char *text) __attribute__((weak_import));
+ static void
+ native_gpu_addon_mount(proc_t p, user_addr_t scratch, user_addr_t offset, const char *source, size_t source_size,
+     const char *point, size_t point_size, const char *visible, const char *own, volatile int *stage, volatile int *status)
+@@ -8613,6 +8618,24 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ 	    "7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca/assets/J120.HEIC",
+ 	    "/Library/Wallpaper/Collections/iPadOS_17~ipad.wallpaperCollection/Wallpapers/7570.iPadOS_17_Flat-1024w-1366h@2x~ipad.wallpaper/"
+ 	    "7570.iPadOS_17_Flat_Background-1024w-1366h@2x~ipad.ca/J120.png", &native_gpu_addon3_stage, &native_gpu_addon3_status);
++	/* The OnePlus 13T audio server plug-in (PaganiAudio.driver, UniXNU-Pagani-Drivers drivers/PaganiAudio) beside the system's: the
++	 * audio server (audiomxd) loads every driver bundle in /System/Library/Audio/Plug-Ins/HAL. The owner overlay /private/var/ngpu/audio
++	 * (drivers/PaganiAudio/scripts/add-pagani-audio-data.py) is shown over the directory like the overlays above, only with boot-arg
++	 * pagani-audio (the kernel service the plug-in opens runs only then). Its mount arguments take scratch 0xe40..0xf58, clear of every
++	 * other use of the page. Stage 5 status 0: mounted with the system's BuiltinAudioPlugin.driver and the owner's plug-in visible;
++	 * stage 1: no source directory (a Data seed without the plug-in). */
++	uint32_t audio_enabled = 0;
++	if (PE_parse_boot_argn("pagani-audio", &audio_enabled, sizeof(audio_enabled)) && audio_enabled) {
++		static const char audio_source[] = "/private/var/ngpu/audio", audio_point[] = "/System/Library/Audio/Plug-Ins/HAL";
++		native_gpu_addon_mount(p, scratch, 0xe40, audio_source, sizeof(audio_source), audio_point, sizeof(audio_point),
++		    "/System/Library/Audio/Plug-Ins/HAL/BuiltinAudioPlugin.driver", "/System/Library/Audio/Plug-Ins/HAL/PaganiAudio.driver/Info.plist",
++		    &native_audio_addon_stage, &native_audio_addon_status);
++		if (boot_progress_trace) {
++			char line[64];
++			snprintf(line, sizeof(line), "overlay audio stage %d status %d", native_audio_addon_stage, native_audio_addon_status);
++			boot_progress_trace(line);
++		}
++	}
+ 	native_cryptex_os_view(p, scratch);
+ 	native_gestalt_cache_drop(p, scratch);
+ 	native_ls_store_drop(p, scratch);

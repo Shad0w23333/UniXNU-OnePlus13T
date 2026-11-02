@@ -1,0 +1,33 @@
+--- a/UniXNU-Pagani_SM8750-gpu/board.toml	2026-10-31 07:46:07
++++ b/UniXNU-Pagani_SM8750-gpu/board.toml	2026-10-31 09:34:00
+@@ -18,7 +18,7 @@
+ # Adreno830 is the A830 kernel GPU driver (local source: local.toml or --local-module driver:Adreno830=../Adreno830).
+ # AdrenoMetal is selected from the start: the staged accelerator compiles against its OriginalAcceleratorABI.h; it is a
+ # payload-stage component and adds nothing to the kernel archives.
+-include = ["BootProgress", "NativeAES", "NativeKeyStoreEvents", "NativeMobileDisplay", "NativeRamBlock", "NativeUfs", "NativeVirtioBlock", "PaganiArmCpu", "PaganiArmDTPlatform", "PaganiDarwinBoot", "ShengPlatformPower", "Stage7Probe", "NativePrelink", "PaganiVerifiedRoot", "Sm8750Platform", "PaganiInput", "PaganiPanel", "QcomGeniSpi", "Adreno830", "AdrenoMetal", "PaganiAdsp", "PaganiAudio", "PaganiBattery", "PaganiHaptics"]
++include = ["BootProgress", "NativeAES", "NativeKeyStoreEvents", "NativeMobileDisplay", "NativeRamBlock", "NativeUfs", "NativeVirtioBlock", "PaganiArmCpu", "PaganiArmDTPlatform", "PaganiDarwinBoot", "ShengPlatformPower", "Stage7Probe", "NativePrelink", "PaganiVerifiedRoot", "Sm8750Platform", "PaganiInput", "PaganiPanel", "QcomGeniSpi", "Adreno830", "AdrenoMetal", "PaganiAdsp", "PaganiAudio", "PaganiBattery", "PaganiHaptics", "PaganiSensors"]
+ 
+ [kernel]
+ config_fragments = ["arch:configs/common.config", "soc:configs/sm8750.config", "os:configs/ipados.config"]
+@@ -51,7 +51,11 @@
+   "component:PaganiBattery",
+   # The vibrator (pagani-haptics=1; 2 dry run; default off), appended to the A830 archive the same way; Stage7Probe calls
+   # pagani_haptics_start after the audio service.
+-  "component:PaganiHaptics"
++  "component:PaganiHaptics",
++  # The sensors (pagani-sensors=1 iOS services only, 2 the hub's lookups, 3 streams; 2 and 3 need pagani-adsp=1; default off),
++  # appended to the A830 archive the same way (its HID class is qualified against the pinned kernelcache and registered late);
++  # Stage7Probe calls pagani_sensors_start after the ADSP and haptics starts.
++  "component:PaganiSensors"
+ ]
+ 
+ [kernel.prelink]
+@@ -85,6 +89,8 @@
+ # GPU (Adreno830, M7-M9): pagani-gpu=1 runs the driver, sheng-gpu-addon=1 mounts the plugin seed, sheng-gpu-metal-opens=0
+ # lifts the per-process open limit, sheng-fb-gpu=1 hands the scanout copy to the GPU. Display: sheng-vsync only switches the
+ # refresh tick on; its rate is pagani-vsync (default 120, the AA594 panel's timing) and pagani-te=1 (M12) locks it to the TE.
++# Sensors (PaganiSensors, default off): pagani-sensors=1 publishes the iOS sensor services only; with pagani-adsp=1, 2 also looks the
++# sensors up on the ADSP's sensor hub and 3 streams what iOS asks for (pagani-sensors-axes, -als, -prox, -motion-hz, -log: README).
+ # Test loop (BootProgress RamoopsLog): pagani-ramoops=1 keeps the boot log in the Android ramoops region (read back from
+ # Android with gpu-test-loop); pagani-panic-reset=20 warm-resets 20 s after a panic screen (=0 halts as before). Loop images
+ # add --kernel-arg pagani-reset-after=<seconds>, which resets that long after boot whatever happens.

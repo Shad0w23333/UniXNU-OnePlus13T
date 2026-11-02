@@ -1,0 +1,36 @@
+native-arch-timer-frequency.patch（xnu-12377 版 SoC 层）
+
+来源：本项目 UniXNU/patches/xnu/native-arch-timer-frequency.patch（10063 的 arch 层），文本原样落到 12377，
+只有行号偏移。放进 SoC 层的原因：验证流程要求 arch 层就是上游 64 个，而这个补丁处理的是
+SM8750 固件写进 CNTFRQ_EL0 的计数频率，跟 SoC 走也合理。
+作用：XNU_NATIVE_ARCH_TIMER=1 时用 CNTFRQ_EL0 当 timebase 和 dec_clock，并给 bus_to_cpu_rate_num 加除零保护。
+依赖：构建环境要定义 XNU_NATIVE_ARCH_TIMER（上游和我方 build-xnu-4k-baseline.sh 都会传）。
+
+diff --git a/pexpert/arm/pe_identify_machine.c b/pexpert/arm/pe_identify_machine.c
+index 937ce42..d751da4 100644
+--- a/pexpert/arm/pe_identify_machine.c
++++ b/pexpert/arm/pe_identify_machine.c
+@@ -146,11 +146,23 @@ pe_identify_machine(boot_args * bootArgs)
+ 		}
+ 	}
+ 
++#if defined(XNU_NATIVE_ARCH_TIMER) && XNU_NATIVE_ARCH_TIMER
++	/* Architectural counter conversion must use the frequency programmed by firmware. */
++	uint64_t counter_frequency;
++	__asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(counter_frequency));
++	if (counter_frequency == 0 || counter_frequency > UINT32_MAX) {
++		panic("Invalid architectural counter frequency: %llu", counter_frequency);
++	}
++	gPEClockFrequencyInfo.timebase_frequency_hz = (uint32_t)counter_frequency;
++	gPEClockFrequencyInfo.dec_clock_rate_hz = (uint32_t)counter_frequency;
++#endif
++
+ 	/* Set the num / den pairs form the hz values. */
+ 	gPEClockFrequencyInfo.bus_clock_rate_num = gPEClockFrequencyInfo.bus_clock_rate_hz;
+ 	gPEClockFrequencyInfo.bus_clock_rate_den = 1;
+ 
+ 	gPEClockFrequencyInfo.bus_to_cpu_rate_num =
++	    (gPEClockFrequencyInfo.bus_clock_rate_hz == 0) ? 0 :
+ 	    (2 * gPEClockFrequencyInfo.cpu_clock_rate_hz) / gPEClockFrequencyInfo.bus_clock_rate_hz;
+ 	gPEClockFrequencyInfo.bus_to_cpu_rate_den = 2;
+ 

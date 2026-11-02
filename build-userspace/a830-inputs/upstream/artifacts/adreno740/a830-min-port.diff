@@ -1,0 +1,139 @@
+--- a/NativeAdrenoMemory.cpp
++++ b/NativeAdrenoMemory.cpp
+@@ -178,13 +178,7 @@ IOReturn NativeAdrenoMemory::takePooled(size_t bytes,uint64_t limit)
+             spans_=IONewData(NativeAdrenoPhysicalSpan,1);
+             if(!spans_) {poolGive(offset,bytes);return kIOReturnNoMemory;}
+             span_capacity_=1;span_count_=1;spans_[0]={0,physical,bytes};
+-            mapping_=pool.virt+offset;bytes_=bytes;pooled_=true;pool_offset_=offset;prepared_=true;
+-            bzero(mapping_,bytes);
+-            /* Through a write-combined pool's own mapping the zeros go to DRAM; the barrier completes them. */
+-            IOReturn status=kIOReturnSuccess;
+-            if(pool.write_combined)__asm__ volatile("dsb sy":::"memory");
+-            else status=NativeAdrenoMaintainOwnedPages(mapping_,bytes,NativeAdrenoClean);
+-            if(status!=kIOReturnSuccess) {(void)release();return status;}
++            mapping_=pool.virt+offset;bytes_=bytes;pooled_=true;pool_offset_=offset;prepared_=true;unzeroed_=true;
+             native_adreno_pool_stats[1]=native_adreno_pool_stats[1]+1;
+             return kIOReturnSuccess;
+         }
+@@ -192,6 +186,16 @@ IOReturn NativeAdrenoMemory::takePooled(size_t bytes,uint64_t limit)
+     native_adreno_pool_stats[2]=native_adreno_pool_stats[2]+1;
+     return kIOReturnNoResources;
+ }
++/* The zero fill of a BO the pool just gave: the pages are this object's alone, so no lock is needed. */
++IOReturn NativeAdrenoMemory::finishPooled()
++{
++    if(!pooled_ || !unzeroed_)return kIOReturnSuccess;
++    unzeroed_=false;
++    bzero(mapping_,bytes_);
++    /* Through a write-combined pool's own mapping the zeros go to DRAM; the barrier completes them. */
++    if(pool.write_combined) {__asm__ volatile("dsb sy":::"memory");return kIOReturnSuccess;}
++    return NativeAdrenoMaintainOwnedPages(mapping_,bytes_,NativeAdrenoClean);
++}
+ IOReturn NativeAdrenoMemory::allocatePooled(size_t bytes,unsigned bits)
+ {
+     if(descriptor_ || spans_ || quarantined_)return kIOReturnBusy;
+@@ -211,6 +215,7 @@ IOReturn NativeAdrenoMemory::allocate(size_t bytes,unsigned bits,bool contiguous
+     uint64_t limit=UINT64_C(1)<<bits;
+     if(pooled) {
+         status=takePooled(bytes,limit);
++        if(status==kIOReturnSuccess)status=finishPooled();
+         if(status!=kIOReturnNoResources)return status;
+     }
+     /* From here on nothing the pool or another BO shares: the caller needs no Memory lock (allocatePooled); the figures are atomic. */
+--- a/NativeAdrenoMemory.h
++++ b/NativeAdrenoMemory.h
+@@ -49,7 +49,7 @@ class NativeAdrenoMemory final {
+     NativeAdrenoPhysicalSpan *spans_=nullptr;
+     size_t bytes_=0,span_count_=0,span_capacity_=0;
+     uint32_t device_references_=0;
+-    bool prepared_=false,quarantined_=false,write_combined_=false,pooled_=false;
++    bool prepared_=false,quarantined_=false,write_combined_=false,pooled_=false,unzeroed_=false;
+     size_t pool_offset_=0;
+     IOReturn maintainImported(size_t offset,size_t bytes,NativeAdrenoCacheOperation);
+     IOReturn takePooled(size_t bytes,uint64_t limit);
+@@ -74,6 +74,8 @@ public:
+      * nothing shared but atomic figures, so the user-client cores allocate and release it without that lock (int-152: 3 ms a BO,
+      * 90-130 ms a surface-sized one, of page attribute changes). */
+     IOReturn allocatePooled(size_t bytes,unsigned output_bits);
++    /* allocatePooled's zero fill, after the Memory lock is let go; the BO is not published until it succeeded. */
++    IOReturn finishPooled();
+     /* One physically contiguous block taken from the VM early (while memory is not yet fragmented) and cut into BOs afterwards: a BO from it is
+      * one span of the GPU's table instead of one per scattered page (int-137: 59474 spans for 332 MiB, the 65536 span capacity ran out,
+      * BoMap failed, the translator answered out of device memory and the compositor fell back to the CPU; each map also walked every span, 167 ms).
+--- a/NativeAdrenoSubmit.h
++++ b/NativeAdrenoSubmit.h
+@@ -5,6 +5,8 @@
+ #include "NativeAdrenoVm.h"
+ #include "NativeAdrenoStatus.h"
+ 
++/* What upstream's ABI header no longer states; this kernel's fixed limits (a client's queues, a BO's bytes). */
++enum : uint32_t {NativeAdrenoAbiMaxQueues=8,NativeAdrenoAbiMaxBoBytesShift=28};
+ /* IBs of one submission: a whole frame, so the ring prologue (cache flush, idle wait, thread switch) runs once per frame. */
+ enum : size_t {NativeAdrenoSubmitMaxBuffers=128};
+ /* Job slots of the one shared ring (ARCHITECTURE 5.4): every client range (queue / NativeAdrenoSubmitRangeQueues = 0..31, the
+--- a/NativeAdrenoUserClient.cpp
++++ b/NativeAdrenoUserClient.cpp
+@@ -5,6 +5,8 @@
+ 
+ static_assert(uint32_t(NativeAdrenoSubmitRangeQueues)==uint32_t(NativeAdrenoAbiMaxQueues),"one submit range per client's queues");
+ static_assert(NativeAdrenoClientMaxObjects<=UINT32_MAX-1,"tokens are slot + 1 in 32 bits");
++static uint64_t contiguous_tick;
++extern "C" {uint64_t native_adreno_contig_failed_bytes;}
+ /* 0 keeps user BOs cacheable and maintained by their user (int-070..097); 1 (default) write-combines them, as the GPU maps them
+  * non-cacheable. The board's GPU context reads it to write-combine the BO pool once. */
+ extern "C" {volatile uint32_t native_adreno_wc_enabled=1;}
+@@ -287,6 +289,7 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
+         if(!keep_pool_ || NativeAdrenoMemory::poolFreeBytes()>=keep_pool_+(size_t)request->bytes)
+             status=entry->memory.allocatePooled((size_t)request->bytes,output_bits_);
+     }
++    if(status==kIOReturnSuccess)status=entry->memory.finishPooled();
+     /* Outside the pool (none, full, or the render server's share) the BO is this connection's own pages: no Memory lock, so a client's
+      * contiguous search, scattered pages and page attribute changes (int-152: 90-130 ms for a surface-sized BO) never hold up the
+      * render server's BoAlloc/BoImport/BoFree. A scattered allocation costs one VM span per physical page (int-030: 16 MiB came back
+@@ -294,8 +297,16 @@ IOReturn NativeAdrenoUserClient::allocBoInner(const NativeAdrenoAbiBoAlloc *requ
+      * unless the caller demanded contiguity. */
+     if(status==kIOReturnNoResources) {
+         status=kIOReturnUnsupported;
+-        if(request->contiguous==0 && request->bytes>=NativeAdrenoClientContiguousFirstBytes) {
++        /* A contiguous search the free memory cannot serve scans every free page first, under the VM's page-queue and free-page locks:
++         * only small runs are asked for, and after a failure none of that size or larger for a while (allocations, not time: no clock here). */
++        static uint64_t failed_at;
++        uint64_t &failed_bytes=native_adreno_contig_failed_bytes;
++        const uint64_t tick=__atomic_add_fetch(&contiguous_tick,uint64_t(1),__ATOMIC_RELAXED);
++        if(failed_bytes && tick-failed_at>=NativeAdrenoClientContiguousBackoff)failed_bytes=0;
++        if(request->contiguous==0 && request->bytes>=NativeAdrenoClientContiguousFirstBytes && request->bytes<=NativeAdrenoClientContiguousMaxBytes &&
++            !(failed_bytes && request->bytes>=failed_bytes)) {
+             status=entry->memory.allocate((size_t)request->bytes,output_bits_,true,(size_t)request->bytes);
++            if(status) {failed_bytes=request->bytes;failed_at=tick;}
+             if(status && !entry->memory.quarantined() && entry->memory.release()==kIOReturnSuccess)status=kIOReturnUnsupported;
+         }
+         if(status)status=entry->memory.allocate((size_t)request->bytes,output_bits_,request->contiguous!=0,(size_t)request->bytes);
+--- a/NativeAdrenoUserClient.h
++++ b/NativeAdrenoUserClient.h
+@@ -18,7 +18,8 @@ class IOMemoryDescriptor;
+  * Up to NativeAdrenoClientMaxObjects live objects; the submit object's job-slot policy applies (ARCHITECTURE 5.4). */
+ /* The most objects one connection can hold (i567: backboardd crashed twice at 4096); open() takes a smaller power of two for a client
+  * that is not the render server (NativeAdrenoClientObjectsFor, NativeAdrenoPublish.h), so 32 connections do not each pin 4 MiB. */
+-enum : size_t {NativeAdrenoClientMaxObjects=16384,NativeAdrenoClientMinObjects=256,NativeAdrenoClientContiguousFirstBytes=65536};
++enum : size_t {NativeAdrenoClientMaxObjects=16384,NativeAdrenoClientMinObjects=256,NativeAdrenoClientContiguousFirstBytes=65536,
++    NativeAdrenoClientContiguousMaxBytes=131072,NativeAdrenoClientContiguousBackoff=4096};
+ /* Object slots are recycled first in, first out, and a freed slot is reused only after this many allocations of the connection
+  * (ARCHITECTURE 6.5 step 2, M10): a token (slot + 1, the clientMemoryForType selector) and, once the slot encoding is on, a handle's
+  * low word stay unused long after their object is gone. Only when no fresh slot is left is the oldest freed one taken earlier. */
+--- a/NativeAdrenoVm.cpp
++++ b/NativeAdrenoVm.cpp
+@@ -457,11 +457,9 @@ IOReturn NativeAdrenoVm::mapLocked(NativeAdrenoMemory *memory,unsigned upper,uin
+         changes[i]={iova+span.offset,span.physical,span.bytes,permissions,writeback,shareability};
+     }
+     ArmSmmu4KLiveRegion lower=region(0),high=region(1);ArmSmmu4KLiveResult update;
+-    const ArmSmmu4KStatus status=exclusive?
+-        ArmSmmu4KLiveMapContextBatchExclusive(&io_,bank_,context_,lower.arena?&lower:nullptr,
+-            high.arena?&high:nullptr,upper,&visibility_[upper],changes,spans,budget_,&update):
+-        ArmSmmu4KLiveUpdateContextBatch(&io_,bank_,context_,lower.arena?&lower:nullptr,
+-            high.arena?&high:nullptr,upper,&visibility_[upper],changes,spans,1,budget_,&update);
++    /* preflight cleared the pages of conflicting aliases (exclusive, or checked against every other-class range there). */
++    const ArmSmmu4KStatus status=ArmSmmu4KLiveMapContextBatchExclusive(&io_,bank_,context_,lower.arena?&lower:nullptr,
++        high.arena?&high:nullptr,upper,&visibility_[upper],changes,spans,budget_,&update);
+     if(status)return fail(status);
+     /* The programmer's sync_after_map (A830Smmu, annibale profile): once the leaves are published, one invalidation of the
+      * bank's ASID and its TLBSYNC, which A830Smmu's I/O sends as TLBIASID + TLBSYNC = 1. A sync that does not complete within

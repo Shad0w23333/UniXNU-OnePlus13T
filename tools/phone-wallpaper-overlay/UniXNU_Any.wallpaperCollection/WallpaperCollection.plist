@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>identifier</key>
+	<string>62879BFA-F700-4384-83E1-7AD1CC0D0817</string>
+	<key>isLegacyContent</key>
+	<false/>
+	<key>name</key>
+	<string>iPadOS 17</string>
+	<key>order</key>
+	<array>
+		<integer>7565</integer>
+		<integer>7570</integer>
+	</array>
+	<key>source</key>
+	<string>Apple</string>
+</dict>
+</plist>

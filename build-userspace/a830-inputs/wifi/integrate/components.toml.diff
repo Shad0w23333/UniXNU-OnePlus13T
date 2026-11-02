@@ -1,0 +1,25 @@
+--- a/UniXNU/components.toml
++++ b/UniXNU/components.toml
+@@ -929,3 +929,22 @@
+ build_stage = "kernel"
+ build = ["{component}/scripts/build-pagani-haptics.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+ outputs = ["build/pagani-haptics/libPaganiHaptics.a"]
++
++[[component]]
++id = "PaganiWifi"
++kind = "driver"
++function = "OnePlus 13T Wi-Fi: PCIe0 bring-up of the peach chip (17cb:110e), firmware in place from modem_a or the RAM Data seed, its own MHI boot, the Ath12kWifi stack with a peach entry (drivers/PaganiWifi/Ath12kWifi) and the Apple80211 network service"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/PaganiWifi"
++hardware = ["OnePlus 13T PKX110", "SM8750", "Qualcomm peach (WCN7880 family) PCIe 17cb:110e"]
++os_abi = ["ipados-17.7.11-21H461", "nw_abi platform interface"]
++board_dependencies = ["Stage7Probe calls pagani_wifi_start", "pagani-wifi=N (1-6; absent: off)", "peach firmware on modem_a (read in place) or in the RAM Data seed at /private/var/ngpu/firmware/wlan (never in the image)", "Ath12kWifi deps fetched once (drivers/PaganiWifi/Ath12kWifi/tools/fetch-sources.sh, or --fetch-deps)"]
++verified_devices = []
++dependencies = ["Adreno830", "Sm8750Platform", "NativeUfs", "Stage7Probe", "BootProgress"]
++source_files = ["PaganiWifi.cpp", "PaganiWifiNet.cpp", "WifiBringup.cpp", "WifiFirmware.c", "WifiFat.c", "WifiDma.c", "WifiPmic.c", "WifiMhiLoad.c", "MhiBoot.c", "Ath12kWifi/include/nw_abi.h", "Ath12kWifi/tools/peach.py"]
++runtime_identifiers = ["pagani_wifi_start", "pagani_wifi_status", "pagani_wifi_file", "pagani_wifi_wake", "pagani_wifi_net_start", "nw_board_option", "IO80211Controller", "IO80211Interface", "IONetworkStack", "PaganiWLANController", "PaganiWLAN"]
++build_stage = "kernel"
++build = ["{component}/scripts/build-pagani-wifi.py", "--with-ath12k", "--fetch-deps", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
++outputs = ["build/pagani-wifi/libPaganiWifi.a"]

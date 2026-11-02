@@ -1,0 +1,165 @@
+phone-27-ls-store-rebuild.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 5、6、7 块（kern_exec.c）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，27 必需（否则主屏只有设置）。
+作用：LaunchServices 数据库在 lsd 数据容器的 Library/Caches 里，容器名是建 Data 时生成的 UUID。原代码写死一个 UUID，
+换了 seed 就找不到。改成在三个父目录下搜索，每次启动都删掉，让 lsd 按联合视图重建。
+上游记录：只删一次时，异常关机后会留下不含 staged 应用的数据库。
+代价：每次启动都要重建，开机后 lsd 会忙一阵。
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 786e652..2398bc1 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9127,34 +9127,28 @@ native_gestalt_cache_drop(proc_t p, user_addr_t scratch)
+ }
+ /* LaunchServices' database of this Data store was built while /System/Cryptexes/OS led nowhere, so it never registered what lies behind
+  * it (WebKit's extensions among them) and lsd does not register system content again on a later boot of the same OS build. Its files
+- * are removed once, so lsd builds the database again with the path in place; the marker file keeps later boots from repeating it.
+- * Status for the boot log: files removed, or -2 done before, or -errno. */
++ * are removed once, so lsd builds the database again with the path in place; the marker file keeps later boots from repeating it. */
+ #include <sys/dirent.h>
+ volatile int native_ls_store_status = -1;
+-static void
+-native_ls_store_drop(proc_t p, user_addr_t scratch)
++static int
++native_ls_store_names(const char *path, const char *prefix, char (*names)[64], unsigned max, unsigned *found)
+ {
+-	static const char marker[] = "/private/var/ngpu/ls-store-rebuilt-1";
+-	static const char caches[] = "/private/var/mobile/Containers/Data/InternalDaemon/5C583048-0C53-456F-B110-BB12068B787F/Library/Caches";
+-	static const char prefix[] = "com.apple.LaunchServices-";
++	/* The entries of directory path whose names start with prefix ("" for all but . and ..), at most max of them. */
+ 	vfs_context_t ctx = vfs_context_current();
+ 	vnode_t vp = NULLVP;
+-	if (!vnode_lookup(marker, 0, &vp, ctx)) {
+-		vnode_put(vp);
+-		native_ls_store_status = -2;
+-		return;
+-	}
+-	int error = vnode_lookup(caches, 0, &vp, ctx);
++	*found = 0;
++	int error = vnode_lookup(path, 0, &vp, ctx);
+ 	if (error) {
+-		native_ls_store_status = -error;
+-		return;
++		return error;
+ 	}
+-	char names[8][64];
+-	unsigned found = 0;
+ 	char *buffer = kalloc_data(4096, Z_WAITOK);
+ 	uio_t uio = buffer ? uio_create(1, 0, UIO_SYSSPACE, UIO_READ) : NULL;
++	if (!uio) {
++		error = ENOMEM;
++	}
+ 	int eof = 0;
+-	while (uio && !eof && found < 8) {
++	const size_t prefix_length = strlen(prefix);
++	while (uio && !eof && *found < max) {
+ 		uio_reset(uio, uio_offset(uio), UIO_SYSSPACE, UIO_READ);
+ 		uio_addiov(uio, CAST_USER_ADDR_T(buffer), 4096);
+ 		int entries = 0;
+@@ -9165,14 +9159,15 @@ native_ls_store_drop(proc_t p, user_addr_t scratch)
+ 		if (!used) {
+ 			break;
+ 		}
+-		for (size_t at = 0; at + sizeof(struct dirent) - sizeof(((struct dirent *)0)->d_name) <= used && found < 8;) {
++		for (size_t at = 0; at + sizeof(struct dirent) - sizeof(((struct dirent *)0)->d_name) <= used && *found < max;) {
+ 			const struct dirent *entry = (const struct dirent *)(buffer + at);
+ 			if (!entry->d_reclen) {
+ 				break;
+ 			}
+-			if (entry->d_namlen < sizeof(names[0]) && !strncmp(entry->d_name, prefix, sizeof(prefix) - 1)) {
+-				memcpy(names[found], entry->d_name, entry->d_namlen);
+-				names[found++][entry->d_namlen] = 0;
++			const int dot = entry->d_name[0] == '.' && (entry->d_namlen == 1 || (entry->d_namlen == 2 && entry->d_name[1] == '.'));
++			if (!dot && entry->d_namlen < 64 && !strncmp(entry->d_name, prefix, prefix_length)) {
++				memcpy(names[*found], entry->d_name, entry->d_namlen);
++				names[(*found)++][entry->d_namlen] = 0;
+ 			}
+ 			at += entry->d_reclen;
+ 		}
+@@ -9184,22 +9179,68 @@ native_ls_store_drop(proc_t p, user_addr_t scratch)
+ 		kfree_data(buffer, 4096);
+ 	}
+ 	vnode_put(vp);
+-	if (error) {
+-		native_ls_store_status = -error;
+-		return;
++	return error;
++}
++static void
++native_ls_store_drop(proc_t p, user_addr_t scratch)
++{
++	/* LaunchServices keeps its database in the Library/Caches of lsd's data container, whose name is a UUID made when the Data store
++	 * was: it is searched for (the fixed UUID of one earlier store, 5C583048-..., did not exist in this one, so the database was never
++	 * dropped and the staged system apps of iPadOS 27 -- Safari, Photos, Camera, App Store and 49 more, shown in /Applications by
++	 * owner-staged-apps -- were never registered: the Home Screen showed Settings alone). Dropped, lsd rebuilds it from the union
++	 * view and the apps register (untagged-331a73869).
++	 *
++	 * It is dropped at every boot, before lsd starts. The database is a cache that lsd rebuilds whenever it is missing, and the
++	 * staged system apps are registered only by such a rebuild: lsd writes its database back lazily, so a boot that ended
++	 * without a clean shutdown kept a database made since the drop but without the apps (untagged-84edf75a1 showed them,
++	 * untagged-d02fe1633 resumed that store with ls-store=-2 and showed Settings alone). Dropping it each boot registers them
++	 * again every time; no user data lives there.
++	 * Status: removed * 1000 + data containers looked at. */
++	static const char *const parents[] = {"/private/var/mobile/Containers/Data/InternalDaemon", "/private/var/containers/Data/InternalDaemon",
++		                              "/private/var/containers/Data/System"};
++	static const char prefix[] = "com.apple.LaunchServices-";
++	vfs_context_t ctx = vfs_context_current();
++	char (*containers)[64] = kalloc_data(128 * 64, Z_WAITOK);
++	char (*files)[64] = kalloc_data(8 * 64, Z_WAITOK);
++	char *path = kalloc_data(256, Z_WAITOK);
++	int removed = 0, looked = 0;
++	if (!containers || !files || !path) {
++		native_ls_store_status = -ENOMEM;
++		goto done;
+ 	}
+-	int removed = 0;
+-	char path[192];
+-	for (unsigned i = 0; i < found; ++i) {
+-		snprintf(path, sizeof(path), "%s/%s", caches, names[i]);
+-		struct unlink_args request = {.path = scratch + 0xc00};
+-		int32_t result = 0;
+-		if (!copyout(path, request.path, strlen(path) + 1) && !unlink(p, &request, &result)) {
+-			removed++;
++	for (size_t k = 0; k < sizeof(parents) / sizeof(parents[0]); ++k) {
++		unsigned count = 0;
++		if (native_ls_store_names(parents[k], "", containers, 128, &count)) {
++			continue;
++		}
++		for (unsigned i = 0; i < count; ++i) {
++			snprintf(path, 256, "%s/%s/Library/Caches", parents[k], containers[i]);
++			unsigned n = 0;
++			if (native_ls_store_names(path, prefix, files, 8, &n)) {
++				continue;
++			}
++			looked++;
++			for (unsigned j = 0; j < n; ++j) {
++				snprintf(path, 256, "%s/%s/Library/Caches/%s", parents[k], containers[i], files[j]);
++				struct unlink_args request = {.path = scratch + 0xc00};
++				int32_t result = 0;
++				if (!copyout(path, request.path, strlen(path) + 1) && !unlink(p, &request, &result)) {
++					removed++;
++				}
++			}
+ 		}
+ 	}
+-	(void)native_gpu_addon_write(marker, (const uint8_t *)"1\n", 2, 0644, ctx);
+-	native_ls_store_status = removed;
++	native_ls_store_status = removed * 1000 + looked;
++done:
++	if (containers) {
++		kfree_data(containers, 128 * 64);
++	}
++	if (files) {
++		kfree_data(files, 8 * 64);
++	}
++	if (path) {
++		kfree_data(path, 256);
++	}
+ }
+ static void
+ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)

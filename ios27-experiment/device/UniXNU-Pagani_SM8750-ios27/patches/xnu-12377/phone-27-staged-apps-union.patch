@@ -1,0 +1,66 @@
+phone-27-staged-apps-union.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 10、11 块（kern_exec.c），加上文件 ID 开关和启动日志。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，27 建议路线。
+作用：owner-staged-apps=1 时，趁 /private/var 还指向只读 OS 卷，把 staged_system_apps 以只读联合视图挂到 /Applications。
+不用复制到 Data，也不用走 20 分钟的迁移。我方 10063 上的路线是 phone-system-apps-view（复制后挂视图）。
+13T 调整：
+- 挂载前后打开 native_bindfs_file_ids，否则这个视图没有 PATH_FROM_ID，LaunchServices 注册不了小组件扩展。
+  sheng 那边所有 bind 挂载都带文件 ID，我方是按视图开，所以这里要显式打开。
+- 补一行 boot_progress_trace，结果写进启动日志。
+- 第 10 块的上下文被我方 staged 系列改过，手工放在 native_owner_data_prepare 之前。
+scratch 用 0x800 不冲突：native_owner_data_prepare 只用 0x100..0x2ff，Data 挂载之后才轮到 addon。
+启动参数：owner-staged-apps 不带 sheng 前缀，保留。
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 06de809..20ef3ee 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -10017,6 +10017,35 @@ native_staged_apps_prepare(proc_t p, user_addr_t scratch, mount_t data_mount)
+ 	}
+ }
+ 
++/* The deletable system apps (Weather, Calendar, Notes, Maps, ...) ship in the OS volume's /private/var/staged_system_apps: a restore copies
++ * that directory into the Data volume, and the first boot's data migration (SystemAppMigrator) installs the apps from there. An owner
++ * Data seed marks the migration done (it takes over 20 minutes here), so with boot-arg owner-staged-apps=1 the sealed directory itself is
++ * shown as a read-only union view over /Applications, mounted while /private/var still resolves to the OS volume (the Data mount covers
++ * it next). The apps then register as built-in system apps; their code is in the static trust cache with the rest of the OS. bindfs's
++ * vfs_vget lets LaunchServices resolve them by file ID. Never panics: a refused mount only records its status. */
++volatile int native_staged_union_stage = 0;
++volatile int native_staged_union_status = -1;
++static void
++native_staged_apps_union(proc_t p, user_addr_t scratch)
++{
++	uint32_t enabled = 0;
++	if (!PE_parse_boot_argn("owner-staged-apps", &enabled, sizeof(enabled)) || enabled != 1) {
++		return;
++	}
++	static const char source[] = "/private/var/staged_system_apps", point[] = "/Applications";
++	/* 13T：这个视图也要有文件 ID（phone-bindfs-vget.patch），LaunchServices 才能注册里面的插件。 */
++	extern volatile int native_bindfs_file_ids;
++	native_bindfs_file_ids = 1;
++	native_gpu_addon_mount(p, scratch, 0x800, source, sizeof(source), point, sizeof(point), "/Applications/Preferences.app/Info.plist",
++	    "/Applications/Weather.app/Info.plist", &native_staged_union_stage, &native_staged_union_status);
++	native_bindfs_file_ids = 0;
++	if (boot_progress_trace) {
++		char line[64];
++		snprintf(line, sizeof(line), "staged apps union stage %d status %d", native_staged_union_stage, native_staged_union_status);
++		boot_progress_trace(line);
++	}
++}
++
+ static int
+ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ {
+@@ -10060,6 +10089,8 @@ native_owner_data_prepare(proc_t p, user_addr_t scratch)
+ 	    (error = copyout("/private/var", request.path, 13)) ||
+ 	    (error = copyout(device_path, spec, strlen(device_path) + 1)) ||
+ 	    (error = copyout(payload, request.data, sizeof(payload)))) goto done;
++	/* still the OS volume's /private/var */
++	native_staged_apps_union(p, scratch);
+ 	native_owner_data_stage = 2;
+ 	error = mount(p, &request, &result);
+ 	if (error) goto done;

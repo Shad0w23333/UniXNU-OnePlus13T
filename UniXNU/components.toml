@@ -1,0 +1,1045 @@
+schema_version = 1
+
+[[component]]
+id = "ArmCpu"
+kind = "driver"
+function = "ARM generic interrupt controller and timer"
+scope = "arm64"
+repository = "https://github.com/UniXNU/ArmCpu.git"
+revision = "9066b53bbc82e92a98ec44a11dd50fd13eaf1a1b"
+path = "drivers/ArmCpu"
+hardware = ["ARM GICv3", "ARM generic timer"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["ArmCpu.cpp"]
+runtime_identifiers = ["ArmCpu.cpp", "org.blu-sharky.ArmCpu", "ArmCpu"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "ArmCpu"]
+outputs = ["build/armcpu/libArmCpu.a"]
+
+[[component]]
+id = "ArmDTPlatform"
+kind = "driver"
+function = "Device-tree platform expert"
+scope = "arm64"
+repository = "https://github.com/UniXNU/ArmDTPlatform.git"
+revision = "417ff95d6a6e8607ddea9309ec45c3bfd4a67c60"
+path = "drivers/ArmDTPlatform"
+hardware = ["ARM64"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["ArmDTPlatform.cpp"]
+runtime_identifiers = ["ArmDTPlatform.cpp", "org.blu-sharky.ArmDTPlatform", "ArmDTPlatform"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "ArmDTPlatform"]
+outputs = ["build/armdt-platform/libArmDTPlatform.a"]
+
+[[component]]
+id = "ArmVirtPlatform"
+kind = "driver"
+function = "QEMU virt platform expert"
+scope = "platform"
+repository = "https://github.com/UniXNU/ArmVirtPlatform.git"
+revision = "d1423a8bceac4be0478a93d9173587111c040084"
+path = "drivers/ArmVirtPlatform"
+hardware = ["QEMU virt ARM64"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["ArmVirtPlatform.cpp"]
+runtime_identifiers = ["ArmVirtPlatform.cpp", "org.blu-sharky.ArmVirtPlatform", "ArmVirtPlatform"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "ArmVirtPlatform"]
+outputs = ["build/armvirt-platform/libArmVirtPlatform.a"]
+
+[[component]]
+id = "DarwinBoot"
+kind = "driver"
+function = "UEFI XNU loader"
+scope = "firmware"
+repository = "https://github.com/UniXNU/DarwinBoot.git"
+revision = "3325e352d7df68a9f9ad74832ed94a6acbbd7390"
+path = "drivers/DarwinBoot"
+hardware = ["ARM64 UEFI"]
+os_abi = []
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = []
+build_stage = "firmware"
+build = []
+outputs = []
+
+[[component]]
+id = "Adreno740"
+repository_id = 1426848889
+kind = "driver"
+function = "A740 kernel GPU driver"
+scope = "gpu"
+repository = "https://github.com/UniXNU/Adreno740.git"
+revision = "4e0314df8ad29d52f6fa3f9383a540adcd618b87"
+path = "drivers/Adreno740"
+hardware = ["Adreno 740", "SM8550"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["ZAP firmware", "GPU power policy", "reserved memory"]
+verified_devices = ["sheng"]
+dependencies = ["Sm8550Platform", "AdrenoPM4", "AdrenoFirmware", "ArmSmmu4K"]
+source_files = ["NativeAdrenoService.cpp"]
+runtime_identifiers = ["NativeAdreno", "NativeAdrenoService.cpp", "org.blu-sharky.NativeAdreno", "NativeAdrenoGpuService", "NativeAdrenoSmmuService", "NativeAdrenoGmuService"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "Adreno740"]
+outputs = ["build/adreno740/libAdreno740.a"]
+legacy_name = "NativeAdreno"
+legacy_outputs = { "build/native-adreno/libNativeAdreno.a" = "build/adreno740/libAdreno740.a" }
+
+[[component]]
+id = "Adreno830"
+kind = "driver"
+function = "A830 (Gen8) kernel GPU driver"
+scope = "gpu"
+# Repository and owner not decided yet; build from a local checkout (device local.toml or --local-module driver:Adreno830=PATH).
+repository = "https://github.com/UniXNU/Adreno830.git"
+revision = "1b5e192f94e6a8a7e2749653b23640cda51f1fe1"
+path = "drivers/Adreno830"
+hardware = ["Adreno 830", "SM8750"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["GMU/SQE/AQE and signed ZAP firmware", "GPU power policy", "reserved memory", "display hand-off", "power-level bins and bus tables (Adreno830Board)"]
+verified_devices = []
+dependencies = ["Sm8750Platform", "AdrenoPM4", "ArmSmmu4K"]
+source_files = ["NativeAdrenoPublish.cpp", "NativeAdrenoAccelerator.cpp", "Adreno830Start.cpp", "Adreno830Status.cpp"]
+runtime_identifiers = ["NativeAdrenoABI.h", "AGXAccelerator", "AGXDeviceUserClient", "NativeAdrenoGpuPublished", "NativeAdrenoGpu", "native_adreno_publish", "adreno830_start", "pagani_gpu_start", "adreno830_status", "Adreno830Status"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-adreno830.py"]
+outputs = ["build/adreno830/libAdreno830.a"]
+
+[[component]]
+id = "AdrenoMetal"
+repository_id = 1426849428
+kind = "driver"
+function = "Metal frontend through metal2vulkan and Turnip"
+scope = "graphics"
+repository = "https://github.com/UniXNU/AdrenoMetal.git"
+revision = "454ff2ce83766ce7b3e0f355e83f1d72907708b3"
+path = "drivers/AdrenoMetal"
+hardware = ["Turnip Darwin backend", "kernel GPU user-client ABI"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["display integration", "shader cache"]
+verified_devices = ["sheng"]
+dependencies = ["AdrenoPM4"]
+source_files = ["NativeAdrenoMetalPlugin.mm", "NativeBridgeMetalFrontend.mm", "bridge/NativeMetalBridge.rs"]
+runtime_identifiers = ["NativeMetal", "NativeAdrenoMetalPlugin.mm", "NativeBridgeMetalFrontend.mm", "bridge/NativeMetalBridge.rs", "NativeAdrenoMetal.bundle", "NativeAdrenoMetal", "org.blu-sharky.NativeAdrenoMetal", "libvulkan_freedreno.dylib"]
+build_stage = "payload"
+build = ["build-adreno-metal-plugin.py"]
+outputs = ["build/adreno-metal-plugin/NativeAdrenoMetal.bundle"]
+legacy_name = "NativeMetal"
+
+[[component]]
+id = "ShengUfs"
+repository_id = 1426850705
+kind = "driver"
+function = "SM8550 UFS transport and sheng persistent storage"
+scope = "board"
+repository = "https://github.com/UniXNU/ShengUfs.git"
+revision = "e2b32cc429e8cf1501161c1d8c517f8994ceb9b2"
+path = "drivers/ShengUfs"
+hardware = ["SM8550 UFS controller"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["sheng userdata layout", "SM8550 clocks and SMMU"]
+verified_devices = ["sheng"]
+dependencies = ["VirtioMmioBlock", "VerifiedRoot"]
+source_files = ["NativeUfs.cpp"]
+runtime_identifiers = ["NativeUfs", "NativeUfs.cpp", "org.blu-sharky.NativeUfs"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "ShengUfs"]
+outputs = ["build/sheng-ufs/libShengUfs.a"]
+legacy_name = "NativeUfs"
+legacy_outputs = { "build/native-ufs/libNativeUfs.a" = "build/sheng-ufs/libShengUfs.a" }
+
+[[component]]
+id = "ShengHidInput"
+repository_id = 1426849181
+kind = "driver"
+function = "sheng touch input through IOHIDDevice"
+scope = "board"
+repository = "https://github.com/UniXNU/ShengHidInput.git"
+revision = "5f3a37cec0c3fc4234b10726b25489a55f0d77ef"
+path = "drivers/ShengHidInput"
+hardware = ["sheng touch event source"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["touch coordinates and event globals"]
+verified_devices = ["sheng"]
+dependencies = ["ShengNovatekTouch"]
+source_files = ["NativeHidInput.cpp"]
+runtime_identifiers = ["NativeHidInput", "NativeHidInput.cpp"]
+build_stage = "kernel"
+build = ["build-sheng-hid-input.py"]
+outputs = ["build/sheng-hid-input/libShengHidInput.a", "build/sheng-hid-input/NativeHidInput.late.o"]
+legacy_name = "NativeHidInput"
+
+[[component]]
+id = "ShengNovatekTouch"
+repository_id = 1426851990
+kind = "driver"
+function = "NT36532 touch protocol and sheng sensor configuration"
+scope = "board"
+repository = "https://github.com/UniXNU/ShengNovatekTouch.git"
+revision = "a1a6f2b1912b3cde2dcbe96439e5833b9ab250f4"
+path = "drivers/ShengNovatekTouch"
+hardware = ["Novatek NT36532/NT36532E"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["sheng sensor matrix and coordinates"]
+verified_devices = ["sheng"]
+dependencies = ["QcomGeniSpi"]
+source_files = ["NvtTouchCore.c"]
+runtime_identifiers = ["NativeNovatekTouch", "NvtTouchCore.c"]
+build_stage = "embedded"
+build = []
+outputs = []
+legacy_name = "NativeNovatekTouch"
+
+[[component]]
+id = "QcomGeniSpi"
+repository_id = 1426849026
+kind = "driver"
+function = "Qualcomm GENI SPI controller operations"
+scope = "controller"
+repository = "https://github.com/UniXNU/QcomGeniSpi.git"
+revision = "eac47baefe6a5d2368a70351e6ad1b6361bedbe2"
+path = "drivers/QcomGeniSpi"
+hardware = ["Qualcomm GENI SPI"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["MMIO and DMA callbacks", "clocks and pins"]
+verified_devices = []
+dependencies = []
+source_files = ["GeniSpi.c"]
+runtime_identifiers = ["NativeGeniSpi", "GeniSpi.c"]
+build_stage = "embedded"
+build = []
+outputs = []
+legacy_name = "NativeGeniSpi"
+
+[[component]]
+id = "GopFramebuffer"
+repository_id = 1426849559
+kind = "driver"
+function = "UEFI GOP framebuffer and MobileFramebuffer integration"
+scope = "display"
+repository = "https://github.com/UniXNU/GopFramebuffer.git"
+revision = "cf3b42979a9c44219e7bb149543e6fc3388b58ed"
+path = "drivers/GopFramebuffer"
+hardware = ["UEFI GOP framebuffer"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["framebuffer handoff", "display power hooks"]
+verified_devices = ["sheng"]
+dependencies = []
+source_files = ["NativeMobileDisplay.cpp", "NativeLegacyDisplay.cpp"]
+runtime_identifiers = ["NativeMobileDisplay", "NativeMobileDisplay.cpp", "NativeLegacyDisplay.cpp"]
+build_stage = "embedded"
+build = []
+outputs = ["build/gop-framebuffer/libGopFramebuffer.a", "build/gop-framebuffer/libGopFramebuffer.late.a"]
+legacy_name = "NativeMobileDisplay"
+legacy_outputs = { "build/native-mobile-display/libNativeMobileDisplay.late.a" = "build/gop-framebuffer/libGopFramebuffer.late.a" }
+
+[[component]]
+id = "SoftwareAES"
+repository_id = 1426848774
+kind = "driver"
+function = "Software AES-CBC through IOAESAccelerator"
+scope = "os"
+repository = "https://github.com/UniXNU/SoftwareAES.git"
+revision = "4a45326da5c2cd6fe6813d79ee43db20805628af"
+path = "drivers/SoftwareAES"
+hardware = ["XNU AES routines"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["NativeAES.cpp"]
+runtime_identifiers = ["NativeAES", "NativeAES.cpp"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "SoftwareAES"]
+outputs = ["build/software-aes/libSoftwareAES.a"]
+legacy_name = "NativeAES"
+legacy_outputs = { "build/native-aes/libNativeAES.a" = "build/software-aes/libSoftwareAES.a" }
+
+[[component]]
+id = "AppleKeyStoreState"
+repository_id = 1426849312
+kind = "driver"
+function = "AppleKeyStore state and selector handling"
+scope = "os"
+repository = "https://github.com/UniXNU/AppleKeyStoreState.git"
+revision = "42ff83e08b2265fe741d4adaf084bebe003452ba"
+path = "drivers/AppleKeyStoreState"
+hardware = ["AppleKeyStore ABI"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["platform state callbacks"]
+verified_devices = []
+dependencies = []
+source_files = ["NativeKeyStoreEvents.cpp"]
+runtime_identifiers = ["NativeKeyStoreEvents", "NativeKeyStoreEvents.cpp"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "AppleKeyStoreState"]
+outputs = ["build/apple-key-store-state/libAppleKeyStoreState.a"]
+legacy_name = "NativeKeyStoreEvents"
+legacy_outputs = { "build/native-keystore-events/libNativeKeyStoreEvents.a" = "build/apple-key-store-state/libAppleKeyStoreState.a" }
+
+[[component]]
+id = "RamBlock"
+repository_id = 1426849698
+kind = "driver"
+function = "RAM-backed block device and sparse seed storage"
+scope = "storage"
+repository = "https://github.com/UniXNU/RamBlock.git"
+revision = "25c57e0e9b68bf452dd1986914525edc9d2320bc"
+path = "drivers/RamBlock"
+hardware = ["RAM block backing"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["optional persistent storage backend"]
+verified_devices = []
+dependencies = []
+source_files = ["NativeRamBlock.cpp"]
+runtime_identifiers = ["NativeRamBlock", "NativeRamBlock.cpp"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "RamBlock"]
+outputs = ["build/ram-block/libRamBlock.a"]
+legacy_name = "NativeRamBlock"
+legacy_outputs = { "build/native-ram-block/libNativeRamBlock.a" = "build/ram-block/libRamBlock.a" }
+
+[[component]]
+id = "VirtioMmioBlock"
+repository_id = 1426850865
+kind = "driver"
+function = "VirtIO MMIO read-only block transport"
+scope = "protocol"
+repository = "https://github.com/UniXNU/VirtioMmioBlock.git"
+revision = "8ee3a5ab5a3726b0641990228346aec338246eaf"
+path = "drivers/VirtioMmioBlock"
+hardware = ["VirtIO 1.2 modern MMIO split queues"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["NativeVirtioBlock.cpp"]
+runtime_identifiers = ["NativeVirtioBlock", "NativeVirtioBlock.cpp"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "VirtioMmioBlock"]
+outputs = ["build/virtio-mmio-block/libVirtioMmioBlock.a"]
+legacy_name = "NativeVirtioBlock"
+legacy_outputs = { "build/native-virtio-block/libNativeVirtioBlock.a" = "build/virtio-mmio-block/libVirtioMmioBlock.a" }
+
+[[component]]
+id = "VirtioMmioConsole"
+repository_id = 1426850991
+kind = "driver"
+function = "VirtIO MMIO console transport"
+scope = "protocol"
+repository = "https://github.com/UniXNU/VirtioMmioConsole.git"
+revision = "70253216890b2afcaa6333948726f896f84fc757"
+path = "drivers/VirtioMmioConsole"
+hardware = ["VirtIO 1.2 modern MMIO split queues"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["NativeVirtioConsole.cpp"]
+runtime_identifiers = ["NativeVirtioConsole", "NativeVirtioConsole.cpp"]
+build_stage = "kernel"
+build = ["build-arm-driver.py", "VirtioMmioConsole"]
+outputs = ["build/virtio-mmio-console/libVirtioMmioConsole.a"]
+legacy_name = "NativeVirtioConsole"
+legacy_outputs = { "build/native-virtio-console/libNativeVirtioConsole.a" = "build/virtio-mmio-console/libVirtioMmioConsole.a" }
+
+[[component]]
+id = "XnuPrelink"
+repository_id = 1426851690
+kind = "kit"
+function = "XNU kernelcache prelink and ABI inspection"
+scope = "tool"
+repository = "https://github.com/UniXNU/XnuPrelink.git"
+revision = "f876e3ee62e18fc06653dd75ed7dafcfb3950ac0"
+path = "kits/XnuPrelink"
+hardware = []
+os_abi = []
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["emit_prelink.py", "native_prelink.py"]
+runtime_identifiers = ["NativePrelink", "emit_prelink.py", "native_prelink.py"]
+build_stage = "prelink"
+build = []
+outputs = []
+legacy_name = "NativePrelink"
+
+[[component]]
+id = "AdrenoPM4"
+kind = "kit"
+function = "Adreno PM4 packet encoding and A740 command helpers"
+scope = "gpu"
+repository = "https://github.com/UniXNU/AdrenoPM4.git"
+revision = "282606b528b2595bc4274ea7490b62b323f35a5f"
+path = "kits/AdrenoPM4"
+hardware = ["Adreno packet type 4 and 7", "A740 command layouts"]
+os_abi = []
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = ["AdrenoPM4.c"]
+runtime_identifiers = ["AdrenoPM4.c"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "AdrenoFirmware"
+kind = "kit"
+function = "Adreno firmware and HFI protocol support"
+scope = "gpu"
+repository = "https://github.com/UniXNU/AdrenoFirmware.git"
+revision = "20ad3d7aca14bd46aecab6335c780f5413fa054b"
+path = "kits/AdrenoFirmware"
+hardware = ["Adreno A6xx/A7xx HFI"]
+os_abi = []
+board_dependencies = ["platform firmware and startup inputs"]
+verified_devices = []
+dependencies = []
+source_files = ["AdrenoFirmware.c", "AdrenoHfi.c"]
+runtime_identifiers = ["AdrenoFirmware.c", "AdrenoHfi.c"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "ArmSmmu4K"
+kind = "kit"
+function = "ARM SMMU translation with 4 KiB pages"
+scope = "controller"
+repository = "https://github.com/UniXNU/ArmSmmu4K.git"
+revision = "8bb168ad058c28d5c04f179ba407875eacba7ef3"
+path = "kits/ArmSmmu4K"
+hardware = ["ARM SMMU", "MMU-500"]
+os_abi = []
+board_dependencies = ["stream ownership", "hardware readback policy"]
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = []
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "AirNir"
+kind = "kit"
+function = "AIR shader translation support"
+scope = "graphics"
+repository = "https://github.com/UniXNU/AirNir.git"
+revision = "b356371a74cd158c2902f4886f373ebb0f833a36"
+path = "kits/AirNir"
+hardware = ["AIR and NIR interfaces"]
+os_abi = []
+board_dependencies = []
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = []
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "VerifiedRoot"
+kind = "kit"
+function = "Authenticated block reads"
+scope = "storage"
+repository = "https://github.com/UniXNU/VerifiedRoot.git"
+revision = "def026642c6c6e71be0dea267d989df1d29ddc64"
+path = "kits/VerifiedRoot"
+hardware = []
+os_abi = []
+board_dependencies = ["signed volume policy"]
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = []
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "Sm8550Platform"
+kind = "kit"
+function = "SM8550 GPU platform operations"
+scope = "soc"
+repository = "https://github.com/UniXNU/UniXNU-sm8550-common.git"
+revision = "23b2049fcd9e30356161def84231334fb55ecca9"
+path = "kits/Sm8550Platform"
+hardware = ["Qualcomm SM8550"]
+os_abi = []
+board_dependencies = ["GPU firmware and power inputs"]
+verified_devices = []
+dependencies = ["AdrenoFirmware", "ArmSmmu4K"]
+source_files = ["ShengGmu.c", "ShengGpuSmmu.c", "ShengGmuCommandDb.c"]
+runtime_identifiers = ["ShengGmu.c", "ShengGpuSmmu.c", "ShengGmuCommandDb.c"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "Ath12kWifi"
+repository_id = 1431462336
+kind = "driver"
+function = "ath12k Wi-Fi transport with MHI and QRTR"
+scope = "controller"
+repository = "https://github.com/UniXNU/Ath12kWifi.git"
+revision = "f6bf561f92cc42761bdd417fce1d53fe1db9477c"
+path = "drivers/Ath12kWifi"
+legacy_name = "NativeWifi"
+hardware = ["ath12k PCI devices", "qcc2072, qcn9274, and wcn7850 build inputs"]
+os_abi = ["nw_abi platform interface"]
+board_dependencies = ["PCI configuration, BAR, MSI, and DMA operations"]
+verified_devices = []
+dependencies = []
+source_files = ["include/nw_abi.h"]
+runtime_identifiers = ["nw_board", "nw_abi"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "ShengPreflight"
+kind = "driver"
+function = "sheng firmware preflight"
+scope = "board"
+repository = "https://github.com/UniXNU/ShengPreflight.git"
+revision = "9cfc8d2c8d77f2008ba228fa6eff83d2c7ab7fd2"
+path = "drivers/ShengPreflight"
+hardware = ["Xiaomi Pad 6S Pro"]
+os_abi = ["UEFI"]
+board_dependencies = ["sheng firmware resources"]
+verified_devices = ["sheng"]
+dependencies = []
+source_files = []
+runtime_identifiers = ["ShengPreflight"]
+build_stage = "firmware"
+build = []
+outputs = []
+
+[[component]]
+id = "BootProgress"
+kind = "driver"
+function = "BootProgress community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/BootProgress"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = ["BootProgress.c", "PeripheralStatus.h", "RamoopsLog.c", "GunyahWdog.c", "UfsLog.c"]
+runtime_identifiers = ["BootProgress"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "NativeAES"
+kind = "driver"
+function = "NativeAES community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/NativeAES"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["NativePrelink"]
+source_files = ["NativeAES.cpp"]
+runtime_identifiers = ["NativeAES"]
+build_stage = "kernel"
+build = ["build-native-aes.py"]
+outputs = ["build/native-aes/libNativeAES.a"]
+
+[[component]]
+id = "NativeKeyStoreEvents"
+kind = "driver"
+function = "NativeKeyStoreEvents community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/NativeKeyStoreEvents"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = ["NativeKeyStoreEvents.cpp"]
+runtime_identifiers = ["NativeKeyStoreEvents"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "NativeMobileDisplay"
+kind = "driver"
+function = "CPU presentation through the iPadOS Legacy framebuffer ABI"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/NativeMobileDisplay"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["NativePrelink", "NativeKeyStoreEvents", "Stage7Probe", "PaganiInput", "PaganiPanel"]
+source_files = ["NativeGOPPresenter.cpp", "NativeLegacyDisplay.cpp", "NativeMobileDisplay.cpp"]
+runtime_identifiers = ["NativeMobileDisplay"]
+build_stage = "kernel"
+build = ["build-stage7-display.py", "--kernelcache", "{out}/../../../ipsw/21H461/kernelcache.decompressed"]
+outputs = ["build/native-legacy-display/libNativeLegacyDisplay.late.a"]
+
+[[component]]
+id = "NativeRamBlock"
+kind = "driver"
+function = "NativeRamBlock community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/NativeRamBlock"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["PaganiVerifiedRoot"]
+source_files = ["NativeRamBlock.cpp"]
+runtime_identifiers = ["NativeRamBlock"]
+build_stage = "kernel"
+build = ["build-native-ufs.py", "--component", "NativeRamBlock", "--root-windows"]
+outputs = ["build/native-ram-block/libNativeRamBlock.a"]
+
+[[component]]
+id = "NativeUfs"
+kind = "driver"
+function = "Read-only SM8750 UFS root windows"
+scope = "sm8750"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/NativeUfs"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["Sm8750Platform", "PaganiVerifiedRoot"]
+source_files = ["NativeUfs.cpp"]
+runtime_identifiers = ["NativeUfs"]
+build_stage = "kernel"
+build = ["build-native-ufs.py", "--root-windows"]
+outputs = ["build/native-ufs/libNativeUfs.a"]
+
+[[component]]
+id = "NativeVirtioBlock"
+kind = "driver"
+function = "NativeVirtioBlock community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/NativeVirtioBlock"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["PaganiVerifiedRoot"]
+source_files = ["NativeVirtioBlock.cpp"]
+runtime_identifiers = ["NativeVirtioBlock"]
+build_stage = "kernel"
+build = ["build-native-ufs.py", "--component", "NativeVirtioBlock", "--root-windows"]
+outputs = ["build/native-virtio-block/libNativeVirtioBlock.a"]
+
+[[component]]
+id = "PaganiArmCpu"
+kind = "driver"
+function = "PaganiArmCpu community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiArmCpu"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["PaganiArmDTPlatform"]
+source_files = ["ArmCpu.cpp"]
+runtime_identifiers = ["ArmCpu"]
+build_stage = "kernel"
+build = ["build-arm-platform.py"]
+outputs = ["build/armcpu/libArmCpu.a", "build/armdt-platform/libArmDTPlatform.a"]
+
+[[component]]
+id = "PaganiArmDTPlatform"
+kind = "driver"
+function = "PaganiArmDTPlatform community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiArmDTPlatform"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = ["ArmDTPlatform.cpp"]
+runtime_identifiers = ["ArmDTPlatform"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "PaganiDarwinBoot"
+kind = "driver"
+function = "PaganiDarwinBoot community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiDarwinBoot"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = ["DarwinBoot"]
+build_stage = "firmware"
+build = []
+outputs = []
+
+[[component]]
+id = "ShengPlatformPower"
+kind = "driver"
+function = "ShengPlatformPower community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/ShengPlatformPower"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["NativePrelink"]
+source_files = ["ShengPlatformPower.cpp"]
+runtime_identifiers = ["ShengPlatformPower"]
+build_stage = "kernel"
+build = ["build-sheng-platform-power.py", "--kernelcache", "{out}/../../../ipsw/21H461/kernelcache.decompressed"]
+outputs = ["build/sheng-platform-power/libShengPlatformPower.a"]
+
+[[component]]
+id = "Stage7Probe"
+kind = "driver"
+function = "Stage7Probe community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/Stage7Probe"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = ["BootProgress"]
+source_files = ["Stage7Probe.cpp"]
+runtime_identifiers = ["Stage7Probe"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "NativePrelink"
+kind = "kit"
+function = "NativePrelink community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "kits/NativePrelink"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = ["NativePrelink"]
+build_stage = "prelink"
+build = []
+outputs = []
+
+[[component]]
+id = "PaganiVerifiedRoot"
+kind = "kit"
+function = "PaganiVerifiedRoot community implementation"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "kits/PaganiVerifiedRoot"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = ["VerifiedRoot"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "Sm8750Platform"
+kind = "kit"
+function = "SM8750 GCC, SMMU, RPMh, SPI timing, SPMI observer and DSI FIFO operations"
+scope = "sm8750"
+repository = "https://github.com/IssacL04/UniXNU-sm8750-common.git"
+revision = "b79d675e522383c29131ccda8529fda45e1f2852"
+path = "kits/Sm8750Platform"
+hardware = ["SM8750"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
+verified_devices = []
+dependencies = []
+source_files = []
+runtime_identifiers = ["Sm8750Platform"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "PaganiInput"
+kind = "driver"
+function = "S3910 TouchComm LBP and physical-key HID input"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiInput"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["PaganiPeripherals.h", "SM8750 retained clocks and firmware state"]
+verified_devices = []
+dependencies = ["QcomGeniSpi", "Sm8750Platform", "NativePrelink", "BootProgress"]
+source_files = ["PaganiInput.cpp", "S3910.c", "S3910.h", "Buttons.h", "Mapping.h", "Reports.h", "HidEvents.h"]
+runtime_identifiers = ["PaganiInput"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "PaganiPanel"
+kind = "driver"
+function = "DSI brightness and display blanking through an owned AppleARMBacklight subclass"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiPanel"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["PaganiPeripherals.h", "SM8750 retained clocks and firmware state"]
+verified_devices = []
+dependencies = ["PaganiInput", "Sm8750Platform", "NativePrelink"]
+source_files = ["PaganiPanel.cpp"]
+runtime_identifiers = ["PaganiPanel"]
+build_stage = "embedded"
+build = []
+outputs = []
+
+[[component]]
+id = "PaganiAdsp"
+kind = "driver"
+function = "OnePlus 13T ADSP bring-up: firmware in place from modem_a, PAS, SMP2P, GLINK and the IPC router service locator"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiAdsp"
+hardware = ["OnePlus 13T PKX110", "SM8750"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["ADSP firmware on modem_a (read in place, never in the image)", "Stage7Probe calls pagani_adsp_start", "pagani-adsp=1"]
+verified_devices = []
+dependencies = ["Adreno830", "NativeUfs"]
+source_files = ["PaganiAdsp.cpp", "AdspCore.c", "AdspQrtr.c", "AdspPlatform.c", "AdspFirmware.c", "QcomSmem.c", "QcomSmp2p.c", "QcomGlink.c", "QcomQrtr.c", "QcomMdt.c", "FatVolume.c"]
+runtime_identifiers = ["PaganiAdsp", "pagani_adsp_start", "pagani_adsp_channel", "pagani_adsp_channel_config", "pagani_adsp_send", "pagani_adsp_channel_up", "pagani_adsp_status", "pagani_adsp_qrtr_open", "pagani_adsp_qrtr_port_number", "pagani_adsp_qrtr_server", "pagani_adsp_qrtr_lookup", "pagani_adsp_qrtr_send", "pagani_adsp_qrtr_close"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-adsp.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-adsp/libPaganiAdsp.a"]
+
+[[component]]
+id = "PaganiAudio"
+kind = "driver"
+function = "Audio service and shared rings for the iOS audio server plug-in (silent backend until the ADSP path)"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiAudio"
+hardware = ["OnePlus 13T PKX110"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_audio_start", "pagani-audio-addon-mount.patch and a Data seed with PaganiAudio.driver"]
+verified_devices = []
+dependencies = ["Stage7Probe", "BootProgress"]
+source_files = ["PaganiAudio.cpp", "PaganiAudioService.cpp", "PaganiAudioEngine.c"]
+runtime_identifiers = ["PaganiAudio", "PaganiAudioUserClient", "pagani_audio_start", "org.unixnu.pagani.audio"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-audio.py"]
+outputs = ["build/pagani-audio/libPaganiAudio.a"]
+
+[[component]]
+id = "PaganiBattery"
+kind = "driver"
+function = "OnePlus 13T battery as an IOPMPowerSource: the NFG8011B fuel gauge on the apps I2C (no DSP needed) and the ADSP battery manager over PMIC GLINK"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiBattery"
+hardware = ["OnePlus 13T PKX110", "SM8750", "NFG8011B"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_battery_start", "pagani-battery=1 (absent: on exactly with pagani-adsp=1)", "battery manager channel only with PaganiAdsp running (pagani-adsp=1)"]
+verified_devices = []
+dependencies = ["Adreno830", "PaganiAdsp", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiBattery.cpp", "PaganiBatteryService.cpp", "BatteryCore.c", "BatteryBattmgr.c", "BatteryGauge.c", "BatteryI2c.c", "BatterySpmi.c"]
+runtime_identifiers = ["PaganiBattery", "pagani_battery_start", "pagani_battery_status"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-battery.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-battery/libPaganiBattery.a"]
+
+[[component]]
+id = "PaganiHaptics"
+kind = "driver"
+function = "OnePlus 13T vibrator: the PMIH010x HAP530 haptics module over SPMI (DIRECT_PLAY, the board's FIFO effects, PCM streaming into the FIFO) with whitelisted, owner-checked writes"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiHaptics"
+hardware = ["OnePlus 13T PKX110", "SM8750", "PMIH010x"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_haptics_start", "pagani-haptics=1 (2: dry run; absent: off)", "PaganiPeripherals.h haptics constants (PAGANI_HAPTICS_*)"]
+verified_devices = []
+dependencies = ["Adreno830", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiHaptics.cpp", "HapticsCore.c", "HapticsSpmi.c"]
+runtime_identifiers = ["pagani_haptics_start", "pagani_haptics_status", "pagani_haptics_constant", "pagani_haptics_effect", "pagani_haptics_stream_begin", "pagani_haptics_stream_write", "pagani_haptics_stream_end", "pagani_haptics_stop", "pagani_haptics_info"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-haptics.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-haptics/libPaganiHaptics.a"]
+
+[[component]]
+id = "PaganiSensors"
+kind = "driver"
+function = "OnePlus 13T sensors for iOS: ambient light, proximity, accelerometer, gyroscope, magnetometer (and a barometer when present) from the ADSP sensor hub (QMI sensor client service 400 over PaganiAdsp's IPC router) as IOHIDEventDriver services with the original 21H461 IOHIDEvent constructors"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiSensors"
+hardware = ["OnePlus 13T PKX110", "SM8750"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_sensors_start after pagani_adsp_start", "pagani-sensors=1/2/3 (absent: off), +4 the FastRPC file service, +8 the orientation service; 2, 3 and +4 need pagani-adsp=1", "the sensor PD's file pack in the Data seed (make-sensor-pack.py, make-phone-seed.py --sensor-pack) for physical sensors", "the XNU patch zzwc-native-adreno-sandbox-grant-all (NativeSandboxGrantAll) for the orientation service's user client"]
+verified_devices = []
+dependencies = ["Adreno830", "PaganiAdsp", "PaganiInput", "NativeMobileDisplay", "Sm8750Platform", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiSensors.cpp", "PaganiSensorsHid.cpp", "PaganiSensorsRpc.cpp", "SensorsCore.c", "SensorsSsc.c", "SensorsPb.c", "SensorsFixed.c", "SensorsHid.c", "SensorsOrient.c", "SensorsPack.c", "SensorsRpc.c"]
+runtime_identifiers = ["PaganiSensorHid", "PaganiSensorSpuClient", "pagani_sensors_start", "pagani_sensors_status", "pagani_sensors_rpc_start"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-sensors.py", "--kernelcache", "{out}/../../../ipsw/21H461/kernelcache.decompressed", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-sensors/libPaganiSensors.a"]
+
+[[component]]
+id = "PaganiWifi"
+kind = "driver"
+function = "OnePlus 13T Wi-Fi: PCIe0 bring-up of the peach chip (17cb:110e), firmware in place from modem_a or the RAM Data seed, its own MHI boot, the Ath12kWifi stack with a peach entry (drivers/PaganiWifi/Ath12kWifi) and the Apple80211 network service"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiWifi"
+hardware = ["OnePlus 13T PKX110", "SM8750", "Qualcomm peach (WCN7880 family) PCIe 17cb:110e"]
+os_abi = ["ipados-17.7.11-21H461", "nw_abi platform interface"]
+board_dependencies = ["Stage7Probe calls pagani_wifi_start", "pagani-wifi=N (1-6; absent: off)", "peach firmware on modem_a (read in place) and in the RAM Data seed at /private/var/ngpu/firmware/wlan (never in the image; board data and regulatory database first from the seed)", "Ath12kWifi/deps: Linux v7.0.14 and FreeBSD releng/15.1 sources, a link to a local copy outside every repository or tools/fetch-sources.sh once; the recipe fails without them"]
+verified_devices = []
+dependencies = ["Adreno830", "Sm8750Platform", "NativeUfs", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiWifi.cpp", "PaganiWifiNet.cpp", "WifiBringup.cpp", "WifiFirmware.c", "WifiFat.c", "WifiDma.c", "WifiPmic.c", "WifiMhiLoad.c", "WifiRddm.c", "MhiBoot.c", "Ath12kWifi/include/nw_abi.h", "Ath12kWifi/tools/peach.py"]
+runtime_identifiers = ["pagani_wifi_start", "pagani_wifi_status", "pagani_wifi_file", "pagani_wifi_wake", "pagani_wifi_net_start", "nw_board_option", "IO80211Controller", "IO80211Interface", "IONetworkStack", "PaganiWLANController", "PaganiWLAN"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-wifi.py", "--with-ath12k", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-wifi/libPaganiWifi.a"]
+
+[[component]]
+id = "PaganiBt"
+kind = "driver"
+function = "OnePlus 13T Bluetooth: power-up of the peach BT subsystem (rails with the UFS-safe S7I rules, rfclka1, sleep clock, BT_EN), GENI UART in FIFO polling mode, IBS, the Android 0x31 peripheral/TME-L/BT firmware download, an LE scan self test, and the bridge to the real bluetoothd (the com.apple.uart.sk.bluetooth kernel control, the bluetooth service, a local answer for every vendor command, guards that withdraw it all)"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiBt"
+hardware = ["OnePlus 13T PKX110", "SM8750", "Qualcomm peach (ganges/BRAHMA) over QUP2 SE6 UART"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_bt_start", "pagani-bt=N (absent: off)", "BT firmware in place on bluetooth_a and modem_a (never in the image)", "stage 4: com.apple.bluetoothd enabled in the Data seed and the two text fix-ups of integration/text-fixups.txt"]
+verified_devices = []
+dependencies = ["Adreno830", "Sm8750Platform", "NativeUfs", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiBt.cpp", "PaganiBtHost.cpp", "BtBridge.c", "BtBringup.c", "BtDownload.c", "BtFirmware.c", "BtFat.c", "BtGeni.c", "BtH4.c", "BtIbs.c", "BtPmic.c", "BtStandIn.c", "BtTlv.c"]
+runtime_identifiers = ["pagani_bt_start", "pagani_bt_status"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-bt.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-bt/libPaganiBt.a"]
+
+[[component]]
+id = "PaganiCamera"
+kind = "driver"
+function = "OnePlus 13T camera bring-up: clock controllers, the titan GDSC, VRM rails behind a voltage whitelist, TLMM, MCLK0 and CCI0, up to reading the telephoto S5KJN5 ID; and the log service of the H6ISP plug-in's test pattern"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiCamera"
+hardware = ["OnePlus 13T PKX110", "SM8750", "Titan 980 CCI, Samsung S5KJN5 telephoto"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_camera_start", "pagani-cam=N (absent: off)"]
+verified_devices = []
+dependencies = ["Adreno830", "Sm8750Platform", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiCamera.cpp", "PaganiCameraIos.cpp", "CamBringup.c", "CamCci.c", "CamPmic.c"]
+runtime_identifiers = ["pagani_camera_start", "pagani_camera_status"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-camera.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-camera/libPaganiCamera.a"]
+
+[[component]]
+id = "PaganiSpeaker"
+kind = "driver"
+function = "OnePlus 13T speakers: two TFA9873 amplifiers on the I2C hub, secondary MI2S through an AudioReach graph on the ADSP, a kernel test tone and the adsp backend of the PaganiAudio service"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiSpeaker"
+hardware = ["OnePlus 13T PKX110", "SM8750", "NXP TFA9873"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_speaker_start", "pagani-speaker=1 (absent: off)", "stages from 6 on need pagani-adsp=1", "pagani-audio=1 for the iOS backend"]
+verified_devices = []
+dependencies = ["Adreno830", "PaganiAdsp", "PaganiAudio", "Sm8750Platform", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiSpeaker.cpp", "SpeakerCore.c", "SpeakerHw.c", "SpeakerBackend.c", "SpeakerTone.c", "SpeakerLimit.c", "Tfa9873.c", "PaganiReach.c", "PaganiGpr.c", "GeniI2c.c"]
+runtime_identifiers = ["pagani_speaker_start", "pagani_speaker_status"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-speaker.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-speaker/libPaganiSpeaker.a"]
+
+[[component]]
+id = "PaganiTorch"
+kind = "driver"
+function = "OnePlus 13T torch: the PM8550 flash LED module over SPMI (channels 0 and 1, 50 mA default, at most 200 mA per channel, 5 minute limit, off on any fault) with whitelisted, owner-checked writes, kern.pagani_torch, and the iOS flashlight's service without a camera"
+scope = "community"
+repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
+revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
+path = "drivers/PaganiTorch"
+hardware = ["OnePlus 13T PKX110", "SM8750", "PM8550"]
+os_abi = ["ipados-17.7.11-21H461"]
+board_dependencies = ["Stage7Probe calls pagani_torch_start", "pagani-torch=1 (2: dry run; absent: off)", "pagani-torch-ios=1 needs phone-torch-overlay.patch and the plug-in in the Data seed and the owner trust cache"]
+verified_devices = []
+dependencies = ["Adreno830", "Stage7Probe", "BootProgress"]
+source_files = ["PaganiTorch.cpp", "PaganiTorchIos.cpp", "PaganiTorchSysctl.c", "TorchCore.c", "TorchSpmi.c", "TorchIos.c"]
+runtime_identifiers = ["AppleH6CamIn", "PaganiTorchUserClient", "pagani_torch_start", "pagani_torch_status", "pagani_torch_set", "pagani_torch_request", "pagani_torch_level", "pagani_torch_ios_commit", "pagani_torch_ios_status"]
+build_stage = "kernel"
+build = ["{component}/scripts/build-pagani-torch.py", "--append-to", "{tree}/build/adreno830/libAdreno830.a"]
+outputs = ["build/pagani-torch/libPaganiTorch.a"]

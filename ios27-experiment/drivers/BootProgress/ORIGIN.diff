@@ -1,0 +1,49 @@
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/panic-entry.py b/Test/panic-entry.py
+--- a/Test/panic-entry.py	2026-10-29 10:38:54
++++ b/Test/panic-entry.py	2026-11-01 12:42:40
+@@ -8,7 +8,9 @@
+ 
+ 
+ def function(source, name):
+-    start = source.index('\nvoid\n' + name + '(') + 1
++    # xnu-12377 marks the common entry __mockable.
++    start = max(source.find(prefix + name + '(') for prefix in ('\nvoid\n', '\n__mockable void\n')) + 1
++    assert start > 0
+     brace = source.index('{', start)
+     depth, end = 1, brace + 1
+     while depth:
+@@ -27,12 +29,13 @@
+ # Keep the actual entry prefix; the rest needs live kernel debugger machinery.
+ entry = entry[:entry.index('#if defined(__x86_64__)')]
+ entry = '\n'.join(line for line in entry.splitlines() if not line.startswith('#pragma'))
+-entry += '\n(void)ctx; (void)panic_data_ptr; original_path++;\n}\n'
++entry += '\n(void)ctx; (void)panic_data_ptr; (void)panic_initiator; original_path++;\n}\n'
+ fixture = '''
+ #define main console_test_main
+ #include "console.c"
+ #undef main
+ typedef unsigned char uuid_t[16];
++#define __mockable
+ #define DEBUGGER_INTERNAL_OPTIONS_MASK 0x200ULL
+ static unsigned original_path, data_calls;
+ static void ext_paniclog_panic_with_data(uuid_t uuid,void *addr,uint32_t length) {
+@@ -56,7 +59,7 @@
+     assert(!strcmp(boot_progress_panic_text,"options argument 43 100000001"));
+     early_boot_progress_init(&args);
+     uuid_t uuid={0x5a}; char data[7]={0};
+-    panic_with_data(uuid,data,sizeof(data),"data %s %u %llx", "argument", 47U, 0x1122334455667788ULL);
++    panic_with_data(uuid,data,sizeof(data),0,"data %s %u %llx", "argument", 47U, 0x1122334455667788ULL);
+     assert(!strcmp(boot_progress_panic_text,"data argument 47 1122334455667788"));
+     assert(data_calls==1 && original_path==3);
+     early_boot_progress_init(&args); early_boot_progress_suspend();
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/WeakDefaults.c b/WeakDefaults.c
+--- a/WeakDefaults.c	1969-12-31 16:00:00
++++ b/WeakDefaults.c	2026-11-01 12:40:38
+@@ -0,0 +1,7 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// The iPadOS 27 kernel link cannot leave a weak import undefined, so what this driver reads from a component that is not built in gets a
++// zero default here; the component's own definition wins. Hidden, so that the static kernel link does not bind it at run time. Only for the
++// components a build leaves out: while the display stack is out, native_legacy_copy_stats; the rest of BootProgress's weak imports come from
++// NativeUfs, PaganiArmCpu and the kernel patches.
++#include <stdint.h>
++__attribute__((weak, visibility("hidden"))) volatile uint64_t native_legacy_copy_stats[4];

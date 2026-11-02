@@ -1,0 +1,92 @@
+phone-27-gpu-connect-map-grant.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 27、67、71、72 块（IOUserClient.cpp、iokit_rpc.c、ipc_kobject.c）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关（GPU）。
+作用：放行 io_connect_map_memory_into_task（2863）和 io_connect_unmap_memory_from_task（2864）过 Sandbox 的
+kobject 过滤，只对 AGXDeviceUserClient。原版配置不让沙盒里的 Metal 客户端（iconservicesagent、海报扩展）走到这两个调用。
+13T 核对：Adreno830/NativeAdrenoPublish.cpp:251 的类名就是 AGXDeviceUserClient，类名判断不用改。
+手工部分：第 27 块的上下文被我方 zzwc 补丁改过，函数放在 native_sandbox_grant_open 之前。
+符号 native_adreno_connect_granted、native_kobj_map_grant 不带 sheng 前缀，保留。
+
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+index 19d4fe8..329a216 100644
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -4407,6 +4407,15 @@ native_sandbox_grant(IOService * service)
+ 	return false;
+ }
+ 
++/* The kobject filter grant (osfmk/device/iokit_rpc.c native_kobj_map_grant): the native GPU driver's user client only. */
++extern "C" boolean_t native_adreno_connect_granted(io_object_t obj);
++extern "C" boolean_t
++native_adreno_connect_granted(io_object_t obj)
++{
++	IOUserClient * client = OSDynamicCast(IOUserClient, (OSObject *) obj);
++	return client && 0 == strcmp(client->getMetaClass()->getClassName(), "AGXDeviceUserClient");
++}
++
+ /*
+  * The open path's grant: the process list above, or every process when the service carries NativeSandboxGrantAll = true (the A830
+  * driver's accelerator: every app and extension may run its Metal plugin, which decides itself which processes get a device by the
+diff --git a/osfmk/device/iokit_rpc.c b/osfmk/device/iokit_rpc.c
+index fd3e49e..64bcd3f 100644
+--- a/osfmk/device/iokit_rpc.c
++++ b/osfmk/device/iokit_rpc.c
+@@ -125,6 +125,25 @@ iokit_lookup_connect_port(ipc_port_t port)
+ 	return iokit_lookup_io_object(port, IKOT_IOKIT_CONNECT);
+ }
+ 
++/* io_connect_map_memory_into_task (2863) and io_connect_unmap_memory_from_task (2864) on the native GPU driver's user client:
++ * allowed past the sandbox's kobject filter (ipc_kobject_server_internal). Any other routine or object: false. */
++extern boolean_t native_adreno_connect_granted(io_object_t obj);
++boolean_t native_kobj_map_grant(ipc_port_t port, mach_msg_id_t msgh_id);
++boolean_t
++native_kobj_map_grant(ipc_port_t port, mach_msg_id_t msgh_id)
++{
++	if ((msgh_id != 2863 && msgh_id != 2864) || !IP_VALID(port) || ip_type(port) != IKOT_IOKIT_CONNECT) {
++		return FALSE;
++	}
++	io_object_t obj = iokit_lookup_connect_port(port);
++	if (!obj) {
++		return FALSE;
++	}
++	boolean_t granted = native_adreno_connect_granted(obj);
++	iokit_remove_connect_reference(obj);
++	return granted;
++}
++
+ MIGEXTERN io_object_t
+ iokit_lookup_ident_port(ipc_port_t port)
+ {
+diff --git a/osfmk/kern/ipc_kobject.c b/osfmk/kern/ipc_kobject.c
+index d4272a1..fb9b778 100644
+--- a/osfmk/kern/ipc_kobject.c
++++ b/osfmk/kern/ipc_kobject.c
+@@ -129,6 +129,8 @@
+ #include <ipc/ipc_kmsg.h>
+ #include <ipc/ipc_policy.h>
+ #include <ipc/ipc_port.h>
++
++extern boolean_t native_kobj_map_grant(ipc_port_t port, mach_msg_id_t msgh_id);
+ #include <ipc/ipc_voucher.h>
+ #include <kern/sync_sema.h>
+ #include <kern/work_interval.h>
+@@ -562,10 +564,13 @@ ipc_kobject_server_internal(
+ 	int idx = ptr->kobjidx;
+ 	uint8_t *filter_mask = task_get_mach_kobj_filter_mask(curtask);
+ 
+-	/* Check kobject mig filter mask, if exists. */
++	/* Check kobject mig filter mask, if exists. The native GPU driver's own user client is mapped and unmapped by its
++	 * sandboxed Metal clients (iconservicesagent, the poster extensions), which the original profiles never let reach
++	 * io_connect_map_memory_into_task: native_kobj_map_grant lets those two routines through for that client only. */
+ 	if (filter_mask != NULL &&
+ 	    (idx == KOBJ_IDX_NOT_SET || !bitstr_test(filter_mask, idx)) &&
+-	    mac_task_kobj_msg_evaluate != NULL) {
++	    mac_task_kobj_msg_evaluate != NULL &&
++	    !native_kobj_map_grant(port, request_msgh_id)) {
+ 		/* No index registered by Sandbox, or not in filter mask: evaluate policy. */
+ 		kern_return_t kr = mac_task_kobj_msg_evaluate(curproc,
+ 		    request_msgh_id, idx);

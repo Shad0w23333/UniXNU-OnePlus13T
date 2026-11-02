@@ -1,0 +1,53 @@
+--- a/工具/make-a830-layout.sh
++++ b/工具/make-a830-layout.sh
+@@ -25,6 +25,8 @@
+ # 开箱即用; A830_TARGET_TYPE replaces the phone variants' target-type; A830_ISLAND_FIXUP=0 leaves the island's status-bar fix-up out;
+ # A830_CORNER_RADIUS=<points> adds /product display-corner-radius (MobileGestalt DeviceCornerRadius, absent by default).
+ # A830_CI_GL_FIXUP=0 leaves out the Core Image fix-up (on by default, every variant: below, before the board edit).
++# A830_EXTRA_FIXUPS="<fix-up> ..." appends text fix-ups to the board's list (e.g. the decoder fix-ups of
++# build-userspace/a830-inputs/ui-rest/integrate/vt-fixups.txt); unset adds nothing.
+ # A830_OWNER_TRUST=<bundle> replaces build/adreno-metal-plugin/owner-trust.bundle, for the image and as the base of A830_AUDIO's bundle
+ # (a plugin built elsewhere, next2/metal-for-apps: its bundle trusts the old plugin and the new one). A830_EXTRA_ARGS="arg ..." appends
+ # kernel arguments (e.g. pagani-gpu-va=16) to the phone-plus/phone-apps forms.
+@@ -173,11 +175,12 @@
+ KEEP=$(mktemp)
+ cp "$BOARD" "$KEEP"
+ trap 'cp "$KEEP" "$BOARD"; rm -f "$KEEP"' EXIT
+-python3 - "$BOARD" "$VARIANT" "${A830_TARGET_TYPE:-}" "$ISLAND" "${A830_CORNER_RADIUS:-}" "$CI_FIXUP" "$OS_PROFILE" "$ISLAND_FIXUP" "$KEYBOARD_FIXUP" "${A830_BUILD_TIME:-$(date +%s)}" <<'EOF'
++python3 - "$BOARD" "$VARIANT" "${A830_TARGET_TYPE:-}" "$ISLAND" "${A830_CORNER_RADIUS:-}" "$CI_FIXUP" "$OS_PROFILE" "$ISLAND_FIXUP" "$KEYBOARD_FIXUP" "${A830_BUILD_TIME:-$(date +%s)}" "${A830_EXTRA_FIXUPS:-}" <<'EOF'
+ import sys, tomllib
+ path, variant, target_override, island, corner = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == '1', sys.argv[5]
+ ci_fixup, os_profile, island_fixup, keyboard_fixup = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
+ build_time = int(sys.argv[10])
++extra_fixups = sys.argv[11].split()
+ if not 0 < build_time < 1 << 32:
+     sys.exit(f'make-a830-layout: A830_BUILD_TIME={build_time} is out of range')
+ phone = variant != 'scale3'
+@@ -211,7 +214,7 @@
+     sub('[adt.product.string]\nmodel = "PKX110"\n', f'[adt.product.string]\nmodel = "PKX110"\nproduct-name = "{name}"\n'
+         f'product-description = "{name}"\nartwork-device-idiom = "phone"\ncompatible-device-fallback = "{fallback}"\n'
+         f'\n[adt.root.string]\nmodel = "{model}"\ntarget-type = "{target}"\n')
+-extra = [f for f in (ci_fixup, island_fixup, keyboard_fixup) if f]
++extra = [f for f in (ci_fixup, island_fixup, keyboard_fixup) if f] + extra_fixups
+ if extra:
+     # /chosen/text-fixups (UniXNU scripts/unixnu/payload.py, native-text-fixup.patch, at most 32): the OS profile's fix-ups, then the
+     # Core Image and the island ones above (the board's list replaces the profile's in the merge).
+--- a/工具/test-phone-island-layout.py
++++ b/工具/test-phone-island-layout.py
+@@ -272,6 +272,16 @@
+ 
+     def test_island_target_type(self):
+         self.check_run('phone-island', 'island', target='D331p', A830_TARGET_TYPE='D331p')
++
++    def test_extra_fixups(self):
++        """A830_EXTRA_FIXUPS: the listed fix-ups follow the others in board.toml's text_fixups, in order; unset adds nothing."""
++        extra = ['dyld_shared_cache_arm64.07,321e900,fd7bbfa9fd030091,20008052c0035fd6', 'dyld_shared_cache_arm64.07,2fd6f58,f4630139,ff630139']
++        result, calls, _ = self.box.run('phone-island-apps', A830_EXTRA_FIXUPS=' '.join(extra))
++        self.assertEqual(result.returncode, 0, result.stderr)
++        listed = tomllib.loads(calls[0]['board'])['payload']['text_fixups']
++        self.assertEqual(listed[-2:], extra)
++        self.assertEqual(listed[:-2], PROFILE_FIXUPS + [CI_FIXUP, FIXUP, KB_FIXUP])
++        self.assertLessEqual(len(listed), 32)
+ 
+     def test_island_without_fixup(self):
+         self.check_run('phone-island', 'island', fixup=False, A830_ISLAND_FIXUP='0')

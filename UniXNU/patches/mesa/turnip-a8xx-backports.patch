@@ -1,0 +1,548 @@
+Five gen8 (A8xx) fixes from upstream Mesa, backported onto the pinned 85fda3b:
+  7ea5e51c tu: Fix gen8 TEX_LINE_OFFSET
+  d286f87b freedreno/fdl: Fix gen8 multi-plane descriptor base
+  c88b6ebd tu: Fix bindless descriptor invalidate sequence (applied by hand)
+  14656cee tu: Split large indirect draws on A8xx
+  7638039f tu: Split large indirect count draws on A8xx (its tu_cs::mem_to_reg/cond_write/rmw/reg_to_mem calls are written out as
+           the CP_MEM_TO_REG/CP_COND_WRITE5/CP_REG_RMW/CP_REG_TO_MEM packets those helpers emit; 85fda3b has no such helpers)
+
+diff --git a/src/freedreno/fdl/fd6_view.cc b/src/freedreno/fdl/fd6_view.cc
+index 67f2095..4edaeb4 100644
+--- a/src/freedreno/fdl/fd6_view.cc
++++ b/src/freedreno/fdl/fd6_view.cc
+@@ -196,9 +196,37 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+    }
+ 
+    view->offset = fdl_surface_offset(layout, args->base_miplevel, args->base_array_layer);
+-   uint64_t base_addr = args->iova + view->offset;
+-   uint64_t ubwc_addr = args->iova +
+-      fdl_ubwc_offset(layout, args->base_miplevel, args->base_array_layer);
++
++   bool multi_plane = args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
++                      args->format == PIPE_FORMAT_G8_B8R8_420_UNORM ||
++                      args->format == PIPE_FORMAT_G8_B8_R8_420_UNORM;
++
++   bool ubwc_enabled = fdl_ubwc_enabled(layout, args->base_miplevel);
++
++   /* For single-plane RGB, base_addr[1] is the ubwc addr, otherwise for
++    * multi-plane descriptors, base_addr[n] is the per-plane addr of pixel
++    * or combined ubwc+pixel data:
++    */
++   uint64_t base_addr[3] = {0};
++
++   if (multi_plane) {
++      if (ubwc_enabled) {
++         /* no separate ubwc base, image must have the expected layout */
++         for (uint32_t i = 0; i < 3; i++) {
++            base_addr[i] = args->iova +
++               fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
++         }
++      } else {
++         for (uint32_t i = 0; i < 3; i++) {
++            base_addr[i] = args->iova +
++               fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
++         }
++      }
++   } else {
++      base_addr[0] = args->iova + view->offset;
++      base_addr[1] = args->iova +
++         fdl_ubwc_offset(layout, args->base_miplevel, args->base_array_layer);
++   }
+ 
+    uint32_t pitch = fdl_pitch(layout, args->base_miplevel);
+    uint32_t ubwc_pitch = fdl_ubwc_pitch(layout, args->base_miplevel);
+@@ -211,8 +239,6 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+       fd6_texture_swap(args->format, (enum a6xx_tile_mode)layout->tile_mode, layout->is_mutable);
+    enum a6xx_tile_mode tile_mode = (enum a6xx_tile_mode)fdl_tile_mode(layout, args->base_miplevel);
+ 
+-   bool ubwc_enabled = fdl_ubwc_enabled(layout, args->base_miplevel);
+-
+    bool is_d24s8 = (args->format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
+                     args->format == PIPE_FORMAT_Z24X8_UNORM ||
+                     args->format == PIPE_FORMAT_X24S8_UINT);
+@@ -265,8 +291,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+          A6XX_TEX_MEMOBJ_2_PITCH(pitch) |
+          A6XX_TEX_MEMOBJ_2_TYPE(fdl6_tex_type(args->type, false));
+       view->descriptor[3] = A6XX_TEX_MEMOBJ_3_ARRAY_PITCH(layer_size);
+-      view->descriptor[4] = base_addr;
+-      view->descriptor[5] = (base_addr >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(depth);
++      view->descriptor[4] = base_addr[0];
++      view->descriptor[5] = (base_addr[0] >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(depth);
+       if (args->filter_width) {
+          view->descriptor[6] = A6XX_TEX_MEMOBJ_6_LOG2_PHASES(
+                                   util_logbase2_ceil(args->filter_num_phases) / 2) |
+@@ -278,9 +304,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+       if (layout->tile_all)
+          view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_TILE_ALL;
+ 
+-      if (args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
+-          args->format == PIPE_FORMAT_G8_B8R8_420_UNORM ||
+-          args->format == PIPE_FORMAT_G8_B8_R8_420_UNORM) {
++      if (multi_plane) {
+          /* chroma offset re-uses MIPLVLS bits */
+          assert(args->level_count == 1);
+          if (args->chroma_offsets[0] == FDL_CHROMA_LOCATION_MIDPOINT)
+@@ -288,24 +312,10 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+          if (args->chroma_offsets[1] == FDL_CHROMA_LOCATION_MIDPOINT)
+             view->descriptor[0] |= A6XX_TEX_MEMOBJ_0_CHROMA_MIDPOINT_Y;
+ 
+-         uint64_t base_addr[3];
+-
+          if (ubwc_enabled) {
+             view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_FLAG;
+-            /* no separate ubwc base, image must have the expected layout */
+-            for (uint32_t i = 0; i < 3; i++) {
+-               base_addr[i] = args->iova +
+-                  fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
+-            }
+-         } else {
+-            for (uint32_t i = 0; i < 3; i++) {
+-               base_addr[i] = args->iova +
+-                  fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
+-            }
+          }
+ 
+-         view->descriptor[4] = base_addr[0];
+-         view->descriptor[5] |= base_addr[0] >> 32;
+          view->descriptor[6] =
+             A6XX_TEX_MEMOBJ_6_PLANE_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
+          view->descriptor[7] = base_addr[1];
+@@ -329,8 +339,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+          fdl6_get_ubwc_blockwidth(layout, &block_width, &block_height);
+ 
+          view->descriptor[3] |= A6XX_TEX_MEMOBJ_3_FLAG;
+-         view->descriptor[7] = ubwc_addr;
+-         view->descriptor[8] = ubwc_addr >> 32;
++         view->descriptor[7] = base_addr[1];
++         view->descriptor[8] = base_addr[1] >> 32;
+          view->descriptor[9] |= A6XX_TEX_MEMOBJ_9_FLAG_BUFFER_ARRAY_PITCH(layout->ubwc_layer_size >> 2);
+          view->descriptor[10] |=
+             A6XX_TEX_MEMOBJ_10_FLAG_BUFFER_PITCH(ubwc_pitch) |
+@@ -347,10 +357,9 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+ 
+       assert(!args->filter_width); /* Need descriptor fields defined. */
+ 
+-      descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(base_addr);
+-      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr >> 32) |
+-                      A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false)) |
+-                      A8XX_TEX_MEMOBJ_1_DEPTH(depth);
++      descriptor[0] = A8XX_TEX_MEMOBJ_0_BASE_LO(base_addr[0]);
++      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr[0] >> 32) |
++                      A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, false));
+       descriptor[2] = A8XX_TEX_MEMOBJ_2_WIDTH(width) |
+                       A8XX_TEX_MEMOBJ_2_HEIGHT(height) |
+                       A8XX_TEX_MEMOBJ_2_SAMPLES((enum a3xx_msaa_samples)util_logbase2(layout->nr_samples));
+@@ -363,26 +372,12 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+                       COND(util_format_is_srgb(args->format), A8XX_TEX_MEMOBJ_4_SRGB);
+       descriptor[5] = COND(is_mutable, A8XX_TEX_MEMOBJ_5_MUTABLEEN);
+       descriptor[6] = A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET(pitch * 8) |   /* in bits */
+-                      A8XX_TEX_MEMOBJ_6_MIN_LINE_OFFSET(layout->pitchalign - 6) |
+                       A8XX_TEX_MEMOBJ_6_MIPLVLS(args->level_count - 1);
+ 
+-      if (args->format == PIPE_FORMAT_R8_G8B8_420_UNORM ||
+-          args->format == PIPE_FORMAT_G8_B8R8_420_UNORM ||
+-          args->format == PIPE_FORMAT_G8_B8_R8_420_UNORM) {
+-         uint64_t base_addr[3];
++      if (multi_plane) {
+ 
+          if (ubwc_enabled) {
+             descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG;
+-            /* no separate ubwc base, image must have the expected layout */
+-            for (uint32_t i = 0; i < 3; i++) {
+-               base_addr[i] = args->iova +
+-                  fdl_ubwc_offset(layouts[i], args->base_miplevel, args->base_array_layer);
+-            }
+-         } else {
+-            for (uint32_t i = 0; i < 3; i++) {
+-               base_addr[i] = args->iova +
+-                  fdl_surface_offset(layouts[i], args->base_miplevel, args->base_array_layer);
+-            }
+          }
+ 
+          descriptor[4] |= A8XX_TEX_MEMOBJ_4_BASE_U_LO(base_addr[1]);
+@@ -398,11 +393,15 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+                           A8XX_TEX_MEMOBJ_9_UV_PITCH(fdl_pitch(layouts[1], args->base_miplevel));
+ 
+          return;
+-      } else if (args->filter_width) {
+-         descriptor[5] |= A8XX_TEX_MEMOBJ_5_FILTER_SIZE_X(args->filter_width) |
+-                          A8XX_TEX_MEMOBJ_5_FILTER_SIZE_Y(args->filter_height) |
+-                          A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_X(args->filter_center_x) |
+-                          A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_Y(args->filter_center_y);
++      } else {
++         descriptor[1] |= A8XX_TEX_MEMOBJ_1_DEPTH(depth);
++         descriptor[6] |= A8XX_TEX_MEMOBJ_6_MIN_LINE_OFFSET(layout->pitchalign - 6);
++         if (args->filter_width) {
++            descriptor[5] |= A8XX_TEX_MEMOBJ_5_FILTER_SIZE_X(args->filter_width) |
++                           A8XX_TEX_MEMOBJ_5_FILTER_SIZE_Y(args->filter_height) |
++                           A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_X(args->filter_center_x) |
++                           A8XX_TEX_MEMOBJ_5_FILTER_OFFSET_Y(args->filter_center_y);
++         }
+       }
+ 
+       descriptor[7] = A8XX_TEX_MEMOBJ_7_ARRAY_SLICE_OFFSET(layer_size);
+@@ -421,8 +420,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+          fdl6_get_ubwc_blockwidth(layout, &block_width, &block_height);
+ 
+          descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG |
+-                          A8XX_TEX_MEMOBJ_4_FLAG_LO(ubwc_addr);
+-         descriptor[5] |= A8XX_TEX_MEMOBJ_5_FLAG_HI(ubwc_addr >> 32) |
++                          A8XX_TEX_MEMOBJ_4_FLAG_LO(base_addr[1]);
++         descriptor[5] |= A8XX_TEX_MEMOBJ_5_FLAG_HI(base_addr[1] >> 32) |
+                           A8XX_TEX_MEMOBJ_5_FLAG_BUFFER_PITCH(ubwc_pitch);
+          descriptor[8] |= A8XX_TEX_MEMOBJ_8_FLAG_ARRAY_PITCH(layout->ubwc_layer_size) |
+                           A8XX_TEX_MEMOBJ_8_FLAG_BUFFER_LOGW(util_logbase2_ceil(DIV_ROUND_UP(width, block_width))) |
+@@ -467,8 +466,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+          A6XX_GRAS_LRZ_VIEW_INFO_BASE_MIP_LEVEL(args->base_miplevel);
+    }
+ 
+-   view->base_addr = base_addr;
+-   view->ubwc_addr = ubwc_addr;
++   view->base_addr = base_addr[0];
++   view->ubwc_addr = base_addr[1];
+    view->layer_size = layer_size;
+    view->ubwc_layer_size = layout->ubwc_layer_size;
+ 
+@@ -490,8 +489,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+          A6XX_TEX_MEMOBJ_2_PITCH(pitch) |
+          A6XX_TEX_MEMOBJ_2_TYPE(fdl6_tex_type(args->type, true));
+       view->storage_descriptor[3] = view->descriptor[3];
+-      view->storage_descriptor[4] = base_addr;
+-      view->storage_descriptor[5] = (base_addr >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(storage_depth);
++      view->storage_descriptor[4] = base_addr[0];
++      view->storage_descriptor[5] = (base_addr[0] >> 32) | A6XX_TEX_MEMOBJ_5_DEPTH(storage_depth);
+       for (unsigned i = 6; i <= 10; i++)
+          view->storage_descriptor[i] = view->descriptor[i];
+    } else if (CHIP >= A8XX) {
+@@ -499,7 +498,7 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
+ 
+       uint32_t *descriptor = view->storage_descriptor;
+ 
+-      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr >> 32) |
++      descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(base_addr[0] >> 32) |
+                       A8XX_TEX_MEMOBJ_1_TYPE(fdl6_tex_type(args->type, true)) |
+                       A8XX_TEX_MEMOBJ_1_DEPTH(storage_depth);
+       descriptor[3] = A8XX_TEX_MEMOBJ_3_FMT(storage_format) |
+diff --git a/src/freedreno/vulkan/tu_cmd_buffer.cc b/src/freedreno/vulkan/tu_cmd_buffer.cc
+index 60ad3a8..049c565 100644
+--- a/src/freedreno/vulkan/tu_cmd_buffer.cc
++++ b/src/freedreno/vulkan/tu_cmd_buffer.cc
+@@ -383,10 +383,16 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
+    if (flushes & TU_CMD_FLAG_CACHE_INVALIDATE)
+       tu_emit_event_write<CHIP>(cmd_buffer, cs, FD_CACHE_INVALIDATE);
+    if (flushes & TU_CMD_FLAG_BINDLESS_DESCRIPTOR_INVALIDATE) {
+-      tu_cs_emit_regs(cs, SP_UPDATE_CNTL(CHIP,
+-            .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
+-            .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
+-      ));
++      /* Backport of mesa c88b6ebd: SP_UPDATE_CNTL's bindless fields do not
++       * exist on a8xx; invalidate through SP_*_BINDLESS_INVALIDATE. */
++      if (CHIP < A8XX) {
++         tu_cs_emit_regs(cs, SP_UPDATE_CNTL(CHIP,
++               .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
++               .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,
++         ));
++      }
++      tu_cs_emit_regs(cs, A6XX_SP_CS_BINDLESS_INVALIDATE(1));
++      tu_cs_emit_regs(cs, A6XX_SP_GFX_BINDLESS_INVALIDATE(1));
+    }
+    if (CHIP >= A7XX && flushes & TU_CMD_FLAG_BLIT_CACHE_CLEAN)
+       /* On A7XX, blit cache flushes are required to ensure blit writes are visible
+@@ -8931,6 +8937,21 @@ draw_wfm(struct tu_cmd_buffer *cmd)
+    cmd->state.renderpass_cache.pending_flush_bits &= ~TU_CMD_FLAG_WAIT_FOR_ME;
+ }
+ 
++template <chip CHIP>
++static uint32_t
++tu_indirect_draw_max_count(uint32_t stride)
++{
++   if (CHIP < A8XX)
++      return UINT32_MAX;
++
++   if (stride == 0)
++      return UINT32_MAX;
++
++   const uint32_t max_fetch_size = ((1 << 20) - 1) * 4;
++   /* Emit at least one draw per packet, even when stride exceeds max_fetch_size. */
++   return MAX2(max_fetch_size / stride, 1);
++}
++
+ template <chip CHIP>
+ VKAPI_ATTR void VKAPI_CALL
+ tu_CmdDrawIndirect(VkCommandBuffer commandBuffer,
+@@ -8950,13 +8971,24 @@ tu_CmdDrawIndirect(VkCommandBuffer commandBuffer,
+ 
+    tu6_draw_common<CHIP>(cmd, cs, false, 0);
+ 
+-   tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 6);
+-   tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
+-   tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_NORMAL) |
+-                  A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(vs_params_offset(cmd)));
+-   tu_cs_emit(cs, drawCount);
+-   tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
+-   tu_cs_emit(cs, stride);
++   const uint32_t dst_off = vs_params_offset(cmd);
++   const uint32_t limit = tu_indirect_draw_max_count<CHIP>(stride);
++   uint32_t remaining = drawCount;
++   uint64_t indirect_va = vk_buffer_address(&buf->vk, offset);
++   do {
++      uint32_t chunk = MIN2(remaining, limit);
++
++      tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 6);
++      tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
++      tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_NORMAL) |
++                     A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(dst_off));
++      tu_cs_emit(cs, chunk);
++      tu_cs_emit_qw(cs, indirect_va);
++      tu_cs_emit(cs, stride);
++
++      remaining -= chunk;
++      indirect_va += (uint64_t)chunk * stride;
++   } while (remaining > 0);
+ 
+    trace_end_draw(&cmd->rp_trace, cs);
+ }
+@@ -8981,20 +9013,144 @@ tu_CmdDrawIndexedIndirect(VkCommandBuffer commandBuffer,
+ 
+    tu6_draw_common<CHIP>(cmd, cs, true, 0);
+ 
+-   tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 9);
+-   tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
+-   tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDEXED) |
+-                  A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(vs_params_offset(cmd)));
+-   tu_cs_emit(cs, drawCount);
+-   tu_cs_emit_qw(cs, cmd->state.index_va);
+-   tu_cs_emit(cs, cmd->state.max_index_count);
+-   tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
+-   tu_cs_emit(cs, stride);
++   const uint32_t dst_off = vs_params_offset(cmd);
++   const uint32_t limit = tu_indirect_draw_max_count<CHIP>(stride);
++   uint32_t remaining = drawCount;
++   uint64_t indirect_va = vk_buffer_address(&buf->vk, offset);
++   do {
++      uint32_t chunk = MIN2(remaining, limit);
++
++      tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 9);
++      tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
++      tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDEXED) |
++                     A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(dst_off));
++      tu_cs_emit(cs, chunk);
++      tu_cs_emit_qw(cs, cmd->state.index_va);
++      tu_cs_emit(cs, cmd->state.max_index_count);
++      tu_cs_emit_qw(cs, indirect_va);
++      tu_cs_emit(cs, stride);
++
++      remaining -= chunk;
++      indirect_va += (uint64_t)chunk * stride;
++   } while (remaining > 0);
+ 
+    trace_end_draw(&cmd->rp_trace, cs);
+ }
+ TU_GENX(tu_CmdDrawIndexedIndirect);
+ 
++/* reg = (reg > ref) ? write_data : reg, as CP_COND_WRITE5 polling and writing the same register (upstream's tu_cs::cond_write with a
++ * register source and destination). */
++static void
++tu6_emit_scratch_cond_write(struct tu_cs *cs, uint32_t reg, uint32_t ref, uint32_t write_data)
++{
++   tu_cs_emit_pkt7(cs, CP_COND_WRITE5, 8);
++   tu_cs_emit(cs, CP_COND_WRITE5_0_FUNCTION(WRITE_GT) |
++                  CP_COND_WRITE5_0_POLL(POLL_REGISTER));
++   tu_cs_emit_qw(cs, reg);
++   tu_cs_emit(cs, CP_COND_WRITE5_3_REF(ref));
++   tu_cs_emit(cs, CP_COND_WRITE5_4_MASK(~0));
++   tu_cs_emit_qw(cs, reg);
++   tu_cs_emit(cs, CP_COND_WRITE5_7_WRITE_DATA(write_data));
++}
++
++/* Split an *IndirectCount draw into multiple CP_DRAW_INDIRECT_MULTI packets,
++ * each processing at most `limit` draws.
++ *
++ * The hardware reads the actual draw count from a GPU-side count buffer and
++ * clamps it to the application's max_draw_count. Since the final count is
++ * only known at execution time, per-packet counts are computed on the GPU:
++ *
++ *   slot[0] = min(count_buffer_value, max_draw_count)
++ *   slot[i] = max(slot[0] - i * limit, 0)
++ *
++ * Each packet then uses INDIRECT_OP_INDIRECT_COUNT with slot[i] as its count
++ * buffer and `limit` as the packet's maxDrawCount, so the hardware executes
++ * min(slot[i], limit) draws from the corresponding slice of the indirect buffer
++ */
++template <chip CHIP>
++static void
++tu6_emit_indirect_count_split(struct tu_cmd_buffer *cmd,
++                              struct tu_cs *cs,
++                              enum a6xx_draw_indirect_opcode opcode,
++                              uint32_t draw_initiator,
++                              uint64_t indirect_va,
++                              uint64_t count_va,
++                              uint32_t stride,
++                              uint32_t max_draw_count,
++                              uint32_t limit,
++                              uint32_t dst_off)
++{
++   assert(CHIP >= A8XX);
++
++   max_draw_count = MIN2(max_draw_count, UINT32_MAX - limit);
++
++   const uint32_t packets = max_draw_count ? 1 + (max_draw_count - 1) / limit : 0;
++   const bool indexed = opcode == INDIRECT_OP_INDIRECT_COUNT_INDEXED;
++
++   tu_cs_set_writeable(&cmd->sub_cs, true);
++   struct tu_cs_memory counts;
++   VkResult result = tu_cs_alloc(&cmd->sub_cs, packets, 1, &counts);
++   tu_cs_set_writeable(&cmd->sub_cs, false);
++   if (result != VK_SUCCESS) {
++      vk_command_buffer_set_error(&cmd->vk, result);
++      return;
++   }
++
++   const struct tu_reg_value pipe_scratch = CP_SCRATCH_PIPE_REG(CHIP, 0, 0);
++
++   /* The packets below are what upstream's tu_cs::mem_to_reg/cond_write/rmw/reg_to_mem helpers emit (mesa 7638039f); this Mesa
++    * predates those helpers, so they are written out. */
++
++   /* Slot 0 = min(count, max_draw_count). */
++   tu_cs_emit_pkt7(cs, CP_MEM_TO_REG, 3);
++   tu_cs_emit(cs, CP_MEM_TO_REG_0_REG(pipe_scratch.reg));
++   tu_cs_emit_qw(cs, count_va);
++   tu6_emit_scratch_cond_write(cs, pipe_scratch.reg, max_draw_count, max_draw_count);
++   tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
++   tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(pipe_scratch.reg));
++   tu_cs_emit_qw(cs, counts.iova);
++
++   /* Slots 1.. hold max(clamped_count - i*limit, 0). */
++   for (uint32_t i = 1; i < packets; i++) {
++      const uint64_t slot_va = counts.iova + (uint64_t)i * sizeof(uint32_t);
++
++      tu_cs_emit_pkt7(cs, CP_REG_RMW, 3);
++      tu_cs_emit(cs, CP_REG_RMW_0_DST_REG(pipe_scratch.reg) |
++                     CP_REG_RMW_0_SRC1_ADD);
++      tu_cs_emit(cs, 0xffffffff);
++      tu_cs_emit(cs, -limit);
++
++      /* Underflow wraps above max_draw_count, so reset it to 0. */
++      tu6_emit_scratch_cond_write(cs, pipe_scratch.reg, max_draw_count, 0);
++
++      tu_cs_emit_pkt7(cs, CP_REG_TO_MEM, 3);
++      tu_cs_emit(cs, CP_REG_TO_MEM_0_REG(pipe_scratch.reg));
++      tu_cs_emit_qw(cs, slot_va);
++   }
++
++   /* Ensure count writes are visible before indirect draws read them. */
++   tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
++   tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
++
++   for (uint32_t i = 0; i < packets; i++) {
++      const uint64_t slot_va = counts.iova + (uint64_t)i * sizeof(uint32_t);
++      const uint64_t indirect_slice_va = indirect_va + (uint64_t)i * limit * stride;
++
++      tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, indexed ? 11 : 8);
++      tu_cs_emit(cs, draw_initiator);
++      tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(opcode) |
++                     A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(dst_off));
++      tu_cs_emit(cs, limit);
++      if (indexed) {
++         tu_cs_emit_qw(cs, cmd->state.index_va);
++         tu_cs_emit(cs, cmd->state.max_index_count);
++      }
++      tu_cs_emit_qw(cs, indirect_slice_va);
++      tu_cs_emit_qw(cs, slot_va);
++      tu_cs_emit(cs, stride);
++   }
++}
++
+ template <chip CHIP>
+ VKAPI_ATTR void VKAPI_CALL
+ tu_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
+@@ -9021,14 +9177,27 @@ tu_CmdDrawIndirectCount(VkCommandBuffer commandBuffer,
+ 
+    tu6_draw_common<CHIP>(cmd, cs, false, 0);
+ 
+-   tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 8);
+-   tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
+-   tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDIRECT_COUNT) |
+-                  A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(vs_params_offset(cmd)));
+-   tu_cs_emit(cs, drawCount);
+-   tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
+-   tu_cs_emit_qw(cs, vk_buffer_address(&count_buf->vk, countBufferOffset));
+-   tu_cs_emit(cs, stride);
++   const uint32_t dst_off = vs_params_offset(cmd);
++   const uint32_t limit = tu_indirect_draw_max_count<CHIP>(stride);
++   const uint64_t indirect_va = vk_buffer_address(&buf->vk, offset);
++   const uint64_t count_va = vk_buffer_address(&count_buf->vk, countBufferOffset);
++
++   if (limit < drawCount) {
++      tu6_emit_indirect_count_split<CHIP>(cmd, cs,
++                                    INDIRECT_OP_INDIRECT_COUNT,
++                                    tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX),
++                                    indirect_va, count_va, stride, drawCount,
++                                    limit, dst_off);
++   } else {
++      tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 8);
++      tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_AUTO_INDEX));
++      tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDIRECT_COUNT) |
++                     A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(dst_off));
++      tu_cs_emit(cs, drawCount);
++      tu_cs_emit_qw(cs, indirect_va);
++      tu_cs_emit_qw(cs, count_va);
++      tu_cs_emit(cs, stride);
++   }
+ 
+    trace_end_draw(&cmd->rp_trace, cs);
+ }
+@@ -9055,16 +9224,29 @@ tu_CmdDrawIndexedIndirectCount(VkCommandBuffer commandBuffer,
+ 
+    tu6_draw_common<CHIP>(cmd, cs, true, 0);
+ 
+-   tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 11);
+-   tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
+-   tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDIRECT_COUNT_INDEXED) |
+-                  A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(vs_params_offset(cmd)));
+-   tu_cs_emit(cs, drawCount);
+-   tu_cs_emit_qw(cs, cmd->state.index_va);
+-   tu_cs_emit(cs, cmd->state.max_index_count);
+-   tu_cs_emit_qw(cs, vk_buffer_address(&buf->vk, offset));
+-   tu_cs_emit_qw(cs, vk_buffer_address(&count_buf->vk, countBufferOffset));
+-   tu_cs_emit(cs, stride);
++   const uint32_t dst_off = vs_params_offset(cmd);
++   const uint32_t limit = tu_indirect_draw_max_count<CHIP>(stride);
++   const uint64_t indirect_va = vk_buffer_address(&buf->vk, offset);
++   const uint64_t count_va = vk_buffer_address(&count_buf->vk, countBufferOffset);
++
++   if (limit < drawCount) {
++      tu6_emit_indirect_count_split<CHIP>(cmd, cs,
++                                    INDIRECT_OP_INDIRECT_COUNT_INDEXED,
++                                    tu_draw_initiator(cmd, DI_SRC_SEL_DMA),
++                                    indirect_va, count_va, stride, drawCount,
++                                    limit, dst_off);
++   } else {
++      tu_cs_emit_pkt7(cs, CP_DRAW_INDIRECT_MULTI, 11);
++      tu_cs_emit(cs, tu_draw_initiator(cmd, DI_SRC_SEL_DMA));
++      tu_cs_emit(cs, A6XX_CP_DRAW_INDIRECT_MULTI_1_OPCODE(INDIRECT_OP_INDIRECT_COUNT_INDEXED) |
++                     A6XX_CP_DRAW_INDIRECT_MULTI_1_DST_OFF(dst_off));
++      tu_cs_emit(cs, drawCount);
++      tu_cs_emit_qw(cs, cmd->state.index_va);
++      tu_cs_emit(cs, cmd->state.max_index_count);
++      tu_cs_emit_qw(cs, indirect_va);
++      tu_cs_emit_qw(cs, count_va);
++      tu_cs_emit(cs, stride);
++   }
+ 
+    trace_end_draw(&cmd->rp_trace, cs);
+ }
+diff --git a/src/freedreno/vulkan/tu_descriptor_set.h b/src/freedreno/vulkan/tu_descriptor_set.h
+index 6a6a1ff..3275186 100644
+--- a/src/freedreno/vulkan/tu_descriptor_set.h
++++ b/src/freedreno/vulkan/tu_descriptor_set.h
+@@ -426,7 +426,8 @@ static inline void
+ tu_desc_set_tex_line_offset(uint32_t *desc, uint32_t tex_line_offset)
+ {
+    if (CHIP >= A8XX) {
+-      desc[6] = pkt_field_set(A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET, desc[6], tex_line_offset);
++      /* TEX_LINE_OFFSET is in bits */
++      desc[6] = pkt_field_set(A8XX_TEX_MEMOBJ_6_TEX_LINE_OFFSET, desc[6], tex_line_offset * 8);
+    } else {
+       desc[2] = pkt_field_set(A6XX_TEX_MEMOBJ_2_PITCH, desc[2], tex_line_offset);
+    }

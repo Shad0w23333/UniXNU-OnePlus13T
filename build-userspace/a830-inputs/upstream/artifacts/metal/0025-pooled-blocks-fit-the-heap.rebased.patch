@@ -1,0 +1,179 @@
+diff --git a/crates/metal2vulkan-runtime/src/buffer.rs b/crates/metal2vulkan-runtime/src/buffer.rs
+index 25cc2024..c57bd179 100644
+--- a/crates/metal2vulkan-runtime/src/buffer.rs
++++ b/crates/metal2vulkan-runtime/src/buffer.rs
+@@ -1773,10 +1773,11 @@ pub(super) const LINEAR_IMAGE_ALIGNMENT: u64 = 256;
+ /// pool starts where the last ends: a buffer shorter than the alignment would leave the rest of
+ /// its unit free, a gap no buffer takes, and the pool's first-fit search (`range.rs`) walks every
+ /// such gap for each later placement, which made each new buffer cost time in proportion to the
+-/// buffers before it. A buffer past half a pooled block keeps its own size: it never lies in a
+-/// pooled block but takes a block of its own (`memory.rs`'s `place`; a pooled block is
+-/// [`BLOCK_BYTES`] on every device, whose `maxMemoryAllocationSize` Vulkan puts at 1 GiB or
+-/// more), where nothing follows it.
++/// buffers before it. A buffer past half of [`BLOCK_BYTES`] keeps its own size: it never lies in a
++/// pooled block but takes a block of its own (`memory.rs`'s `place`; a pooled block is at most
++/// [`BLOCK_BYTES`], smaller on a device with a small heap, `memory::block_bytes`), where nothing
++/// follows it. One between the device's half block and that keeps whole units too, and takes a
++/// block of its own of that size.
+ /// Rounded up to a heap's 256 KiB (`texture/heap.rs`'s `HEAP_BASE_ALIGNMENT`), the largest heap
+ /// would ask past the device's `maxMemoryAllocationSize`: 4 GiB on RADV, whose largest allocation
+ /// is 4 GiB less 4 bytes, and 41,747,218,432 bytes on MoltenVK on an M3 Max, whose largest is
+diff --git a/crates/metal2vulkan-runtime/src/memory.rs b/crates/metal2vulkan-runtime/src/memory.rs
+index e015fc9b..cc630ded 100644
+--- a/crates/metal2vulkan-runtime/src/memory.rs
++++ b/crates/metal2vulkan-runtime/src/memory.rs
+@@ -63,7 +63,8 @@ use std::ptr::NonNull;
+ use std::sync::{Arc, Mutex};
+ use std::time::{Duration, Instant};
+ 
+-/// The size of a pooled block, at most the device's `maxMemoryAllocationSize`.
++/// The size of a pooled block, at most the device's `maxMemoryAllocationSize` and a
++/// [`HEAP_SHARE`]th of its smallest heap ([`block_bytes`]).
+ pub(super) const BLOCK_BYTES: u64 = 64 << 20;
+ 
+ /// The most empty pooled blocks a pool keeps for its next placements ([`Pool::release`]), at
+@@ -110,6 +111,50 @@ struct Spare {
+     since: Instant,
+ }
+ 
++/// The most of a memory heap one pooled block takes: one sixteenth. A device holds a block in
++/// each pool it places into (a memory type's buffers and its images apart, [`Holds`]), keeps
++/// room in up to four pools ahead of every creation call ([`keep_room`]) and keeps one empty
++/// block a pool, so about eight blocks may stand while the program holds little in them: half
++/// the heap at this share. Turnip reports a heap no larger than the process's GPU address window
++/// (`tu_get_system_heap_size` caps it at the kernel's `va_size`), and on the Adreno 830 an app's
++/// window is 124 MiB: with blocks of [`BLOCK_BYTES`] one block of buffers left no room for a
++/// block of images, so Find My's first texture, VectorKit's 128x128 `R8Unorm` atlas, was
++/// refused out of device memory (`newTexture` returned nil and VectorKit aborted).
++pub(super) const HEAP_SHARE: u64 = 16;
++
++/// The smallest pooled block: a placement past half of it takes a block of its own.
++pub(super) const MIN_BLOCK_BYTES: u64 = 1 << 20;
++
++/// The size of a pooled block on a device of memory `properties` whose largest allocation is
++/// `max_allocation` bytes: [`BLOCK_BYTES`], at most a [`HEAP_SHARE`]th of the smallest heap an
++/// allocatable memory type lies in, as a power of two of at least [`MIN_BLOCK_BYTES`], and never
++/// past `max_allocation`. A device whose heaps are all 1 GiB or larger (or that reports none)
++/// keeps [`BLOCK_BYTES`]: a 124 MiB heap takes 4 MiB blocks, a 352 MiB one 16 MiB, 448 MiB 16 MiB.
++pub(super) fn block_bytes(
++    properties: &vk::PhysicalDeviceMemoryProperties,
++    max_allocation: u64,
++) -> u64 {
++    let types = &properties.memory_types
++        [..(properties.memory_type_count as usize).min(vk::MAX_MEMORY_TYPES)];
++    let heaps = &properties.memory_heaps
++        [..(properties.memory_heap_count as usize).min(vk::MAX_MEMORY_HEAPS)];
++    let smallest = (types.iter())
++        .filter(|ty| allocatable(ty.property_flags))
++        .filter_map(|ty| heaps.get(ty.heap_index as usize))
++        .map(|heap| heap.size)
++        .filter(|&size| size > 0)
++        .min();
++    let share = smallest.map_or(BLOCK_BYTES, |size| (size / HEAP_SHARE).min(BLOCK_BYTES));
++    // The largest power of two within the share: half a block (from 512 KiB) stays a whole
++    // number of a heap's 256 KiB base units, which `buffer.rs`'s `placed` rounds a heap up to,
++    // so that rounding never carries a pooled placement past half a block.
++    let power = match share {
++        0 => 0,
++        share => 1 << (63 - share.leading_zeros()),
++    };
++    power.max(MIN_BLOCK_BYTES).min(max_allocation.max(1))
++}
++
+ /// What memory a resource needs.
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+ pub(super) enum MemoryClass {
+@@ -1103,7 +1148,7 @@ impl Memory {
+                 .map(|_| Pool::default())
+                 .collect(),
+             types,
+-            block_bytes: BLOCK_BYTES.min(max_allocation.max(1)),
++            block_bytes: block_bytes(properties, max_allocation),
+             device_address,
+             address_types: None,
+             kept: None,
+diff --git a/crates/metal2vulkan-runtime/src/tests/memory.rs b/crates/metal2vulkan-runtime/src/tests/memory.rs
+index 49d36204..90d6d1e5 100644
+--- a/crates/metal2vulkan-runtime/src/tests/memory.rs
++++ b/crates/metal2vulkan-runtime/src/tests/memory.rs
+@@ -429,3 +429,80 @@ fn short_buffers_are_placed_without_gaps() {
+         end = offset + requirements.size;
+     }
+ }
++
++/// Turnip's memory properties on the Adreno 830 as a connection's GPU window bounds them: one heap
++/// of the window's size (`tu_get_system_heap_size` caps the heap at the kernel's `va_size`), a
++/// write-combined and a host-cached coherent type in it.
++fn turnip(heap: u64) -> vk::PhysicalDeviceMemoryProperties {
++    use vk::MemoryPropertyFlags as P;
++    let mut properties = vk::PhysicalDeviceMemoryProperties {
++        memory_type_count: 2,
++        memory_heap_count: 1,
++        ..Default::default()
++    };
++    properties.memory_types[0] = ty(P::DEVICE_LOCAL | P::HOST_VISIBLE | P::HOST_COHERENT);
++    properties.memory_types[1] =
++        ty(P::DEVICE_LOCAL | P::HOST_VISIBLE | P::HOST_COHERENT | P::HOST_CACHED);
++    properties.memory_heaps[0] = vk::MemoryHeap {
++        size: heap,
++        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
++    };
++    properties
++}
++
++/// A pooled block is at most a sixteenth of the smallest heap, a power of two of at least 1 MiB,
++/// never past the device's largest allocation, and `BLOCK_BYTES` on a device whose heaps are 1 GiB
++/// or larger. An Adreno 830 app's 124 MiB window took 64 MiB blocks, so a block of buffers left no
++/// room for the first texture's block of images (Find My's VectorKit atlas, refused).
++#[test]
++fn pooled_blocks_fit_the_heap() {
++    use crate::memory::{block_bytes, BLOCK_BYTES, HEAP_SHARE, MIN_BLOCK_BYTES};
++    const MIB: u64 = 1 << 20;
++    let max = 0xFFFF_FFFF;
++    // The Adreno 830's client windows (Adreno830 NativeAdrenoClientWindows4G/16G): the render
++    // server's 1.5 GiB keeps 64 MiB, a large client's 352 MiB takes 16 MiB, an app's 124 MiB 4 MiB,
++    // a 16 GiB aperture's small 448 MiB 16 MiB, the 2 GiB table's 170 MiB 8 MiB.
++    for (heap, block) in [
++        (1536 * MIB, 64 * MIB),
++        (0x1600_0000, 16 * MIB),
++        (0x07C0_0000, 4 * MIB),
++        (0x1C00_0000, 16 * MIB),
++        (0x0AAA_9000, 8 * MIB),
++        (8 << 30, BLOCK_BYTES),
++        (1 << 30, BLOCK_BYTES),
++        (16 * MIB, MIB),
++        (4 * MIB, MIN_BLOCK_BYTES),
++    ] {
++        let bytes = block_bytes(&turnip(heap), max);
++        assert_eq!(bytes, block, "heap {heap:#x}");
++        assert!(bytes.is_power_of_two());
++        assert!(bytes <= BLOCK_BYTES && (bytes * HEAP_SHARE <= heap || bytes == MIN_BLOCK_BYTES));
++        // Half a block stays whole units of a heap's base (`buffer.rs`'s `placed`).
++        assert!((bytes / 2).is_multiple_of(crate::texture::heap::HEAP_BASE_ALIGNMENT));
++    }
++    // The device's largest allocation still bounds it, as before.
++    assert_eq!(block_bytes(&turnip(8 << 30), 48 * MIB), 48 * MIB);
++    assert_eq!(block_bytes(&turnip(0x07C0_0000), 2 * MIB), 2 * MIB);
++    // No heap reported (the tests' properties), or heaps of no size: as before.
++    let mut none = turnip(0);
++    assert_eq!(block_bytes(&none, max), BLOCK_BYTES);
++    none.memory_heap_count = 0;
++    assert_eq!(block_bytes(&none, max), BLOCK_BYTES);
++    // The smallest heap an allocatable type lies in counts: a 256 MiB BAR heap beside 16 GiB of
++    // video memory takes 16 MiB; a heap only AMD's device-coherent types lie in is not one the
++    // runtime allocates from.
++    use vk::MemoryPropertyFlags as P;
++    let mut split = turnip(16 << 30);
++    split.memory_heap_count = 2;
++    split.memory_heaps[1] = vk::MemoryHeap {
++        size: 256 * MIB,
++        flags: vk::MemoryHeapFlags::DEVICE_LOCAL,
++    };
++    split.memory_types[1] = vk::MemoryType {
++        property_flags: P::DEVICE_LOCAL | P::HOST_VISIBLE | P::HOST_COHERENT,
++        heap_index: 1,
++    };
++    assert_eq!(block_bytes(&split, max), 16 * MIB);
++    split.memory_types[1].property_flags |= P::DEVICE_COHERENT_AMD;
++    assert_eq!(block_bytes(&split, max), BLOCK_BYTES);
++}

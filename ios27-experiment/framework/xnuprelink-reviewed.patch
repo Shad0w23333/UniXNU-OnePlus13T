@@ -1,0 +1,25 @@
+diff --git a/fixtures/fileset-24A446-symbols.json b/fixtures/fileset-24A446-symbols.json
+index ad8d736..3bd5f54 100644
+--- a/fixtures/fileset-24A446-symbols.json
++++ b/fixtures/fileset-24A446-symbols.json
+@@ -1004,6 +1004,20 @@
+       "original_sha256": "63f7baef323892990578a57f6f1fa48d54de1f990c7b9d95c9036bbd3fa539c5",
+       "native_symbol": "_get_aiotask",
+       "evidence": "BTI; MRS TPIDR_EL1; LDR x0,[x8,#0x708]; RET. The RELEASE reference _get_aiotask has the same thread-relative accessor with its source-layout offset 0x6b8. Source bsd/kern/kern_aio.c returns current_uthread()->uu_aio_task; IOMediaBSDClient.cpp DKR_GET_TASK calls get_aiotask then falls back to current_task. Previous verified mapping and retained IOStorageFamily import agree on this identity. Resolve the native accessor by symbol; do not copy the original thread offset."
++    },
++    {
++      "original": "0xfffffe000ad94128",
++      "original_size": 16,
++      "original_sha256": "486f0d0485670e933a6986389c215972ab15ae46a265bfa627f24f6f43ee3ab1",
++      "native_symbol": "_thread_tid",
++      "evidence": "cbz x0 then ldr x0, [x0, #0x4f0]: returns the thread's id, 0 for a null thread. Source: osfmk/kern/thread.c thread_tid. Native has the same shape at its own field offset (ldr x0, [x0, #0x5e8]); callers take only the return value. Lost to reference-order on the 13T kernel, whose device patches change the neighbouring code in the reference; sheng paired it. apfs, sandbox, IOAVFamily, IOHDCPFamily and AppleM2ScalerCSCDriver call it."
++    },
++    {
++      "original": "0xfffffe000ad94e9c",
++      "original_size": 84,
++      "original_sha256": "15e9c81465efac6623f23e50ec9ccfe028aa75f4b8d009b2ad9962c2639727a8",
++      "native_symbol": "_thread_set_allocation_name",
++      "evidence": "Reads the current thread's kernel state (authenticated with discriminator 0x6d42), loads allocation_name at +0xc0, and stores the argument there when the argument or the old value is null, returning the old value: thread_set_allocation_name's fifo in osfmk/kern/thread.c, line for line. Lost to reference-order on the 13T kernel as above. IOGPUFamily calls it."
+     }
+   ],
+   "data": [

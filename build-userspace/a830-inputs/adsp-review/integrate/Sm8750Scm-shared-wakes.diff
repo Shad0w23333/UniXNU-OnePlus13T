@@ -1,0 +1,104 @@
+--- a/Adreno830/platform/sm8750/Sm8750Scm.c
++++ b/Adreno830/platform/sm8750/Sm8750Scm.c
+@@ -22,6 +22,11 @@
+     __atomic_fetch_add(p, 1, __ATOMIC_RELEASE);
+ }
+ 
++/* Every wake of the boot, whoever fetched it. GET_WQ_CTX hands a wake to one caller only, and the kernel has two Sm8750Scm: the A830
++ * driver's, whose handler of INTID 994 fetches at once, and PaganiAdsp's, which polls (the line has one handler). A waiter looks here,
++ * so a wake the other one fetched still ends its wait. */
++static uint32_t all_wakes[Sm8750ScmWaitqContexts];
++
+ static int ops_valid(const Sm8750ScmOps *ops)
+ {
+     return ops && ops->smc && ops->now_us && ops->sleep_us && !ops->lock == !ops->unlock && !ops->wait == !ops->wake;
+@@ -72,8 +77,10 @@
+         bump(&scm->wq_bad_flags);
+     else if (context >= Sm8750ScmWaitqContexts)
+         bump(&scm->wq_bad_ctx);
+-    else
++    else {
++        bump(&all_wakes[context]);
+         bump(&scm->wakes[context]);
++    }
+ }
+ 
+ /* GET_WQ_CTX (fast) until nothing more is pending, bumping the woken contexts. A failing or empty
+@@ -101,7 +108,7 @@
+  * qcom_scm_wait_for_wq_completion), by the interrupt handler or by polling GET_WQ_CTX ourselves. With the
+  * interrupt attached we poll only once the wait is Sm8750ScmWaitqIrqGraceUs old: an attach that succeeded
+  * does not prove that INTID 994 is delivered, and a lost edge is never repeated. GET_WQ_CTX from both sides
+- * is safe: every wake it reports is counted once, by whoever fetched it. */
++ * is safe: every wake it reports is counted once, by whoever fetched it, also in another Sm8750Scm (all_wakes). */
+ static Sm8750ScmStatus wait_wq(Sm8750Scm *scm, uint32_t context, const uint32_t seen[Sm8750ScmWaitqContexts],
+                                Sm8750SmcResult *r, uint64_t deadline)
+ {
+@@ -110,7 +117,7 @@
+     const uint64_t start = ops->now_us(ops->cookie);
+     int poll = !interrupt;
+     for (;;) {
+-        if (load32(&scm->wakes[context]) != seen[context])
++        if (load32(&all_wakes[context]) != seen[context])
+             return Sm8750ScmOk;
+         if (!poll && ops->now_us(ops->cookie) - start >= Sm8750ScmWaitqIrqGraceUs) {
+             poll = 1;
+@@ -122,7 +129,7 @@
+                 return Sm8750ScmTimeout;
+             if (drain_wq(scm, r))
+                 return Sm8750ScmIoError;
+-            if (load32(&scm->wakes[context]) != seen[context])
++            if (load32(&all_wakes[context]) != seen[context])
+                 return Sm8750ScmOk;
+         }
+         const uint64_t now = ops->now_us(ops->cookie);
+@@ -146,7 +153,7 @@
+         current[i] = request[i];
+     for (;;) {
+         for (unsigned i = 0; i < Sm8750ScmWaitqContexts; i++)
+-            seen[i] = load32(&scm->wakes[i]);
++            seen[i] = load32(&all_wakes[i]);
+         Sm8750ScmStatus s = smc_quirk(scm, current, regs, r, deadline, Sm8750ScmMaxCalls);
+         if (s)
+             return s;
+--- a/Adreno830/tests/test_sm8750_scm.c
++++ b/Adreno830/tests/test_sm8750_scm.c
+@@ -135,6 +135,14 @@
+ static const Sm8750ScmOps ops_template = {NULL, model_smc, model_now, model_sleep, model_lock, model_unlock, model_wait,
+                                           model_wake};
+ 
++static Sm8750Scm *g_other;
++
++static void irq_other(Model *m)
++{
++    (void)m;
++    Sm8750ScmWaitqIrq(g_other);
++}
++
+ static Sm8750ScmOps g_ops;
+ static Sm8750Scm g_scm;
+ 
+@@ -593,6 +601,24 @@
+           "set_remote_state through WAITQ");
+     CHECK(g_scm.last.fid == 0x4200010au && g_scm.history_count == 4, "set_remote_state recorded");
+     done(m);
++
++    /* The kernel has two Sm8750Scm: the interrupt handler of the A830 driver's fetches a wake the other one (PaganiAdsp's, polling) waits
++     * for. GET_WQ_CTX gives a wake to one caller only: the poller must still see it, without a poll that would find nothing. */
++    {
++        static Sm8750Scm other;
++        static Sm8750ScmOps other_ops;
++        m = reset(&model);
++        other_ops = (Sm8750ScmOps){m, model_smc, model_now, model_sleep, NULL, NULL, NULL, NULL};
++        Sm8750ScmInit(&other, &other_ops);
++        g_other = &other;
++        answer(expect(m, 0x42000205, 1, 13, 0, 0, 0), Sm8750ScmX0WaitqSleep, 1, 0x77, 0)->during = irq_other;
++        answer(expect(m, 0xc2002403, 0, 0, 0, 0, 0), 0, 1, Sm8750ScmWakeOne, 0);
++        answer(expect(m, 0x42002402, 1, 0x77, 0, 0, 0), 0, 0, 0, 0);
++        s = Sm8750ScmPasAuthAndReset(&g_scm, 13, &r);
++        CHECK(s == Sm8750ScmOk && r.waitq == 1 && g_scm.polls == 0 && g_scm.wakes[1] == 0 && other.wakes[1] == 1 && other.irqs == 1,
++              "a wake the other Sm8750Scm fetched: %d polls %u", s, g_scm.polls);
++        done(m);
++    }
+ 
+ #if defined(__aarch64__)
+     /* The real instruction is linked (never executed on the host: SMC traps at EL0). */

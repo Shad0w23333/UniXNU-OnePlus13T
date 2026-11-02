@@ -1,0 +1,697 @@
+diff --git a/.gitignore b/.gitignore
+index 59fc3d9..687f284 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,6 +12,7 @@
+ /docs/node_modules/
+ /docs/.vitepress/dist/
+ /docs/.vitepress/cache/
++/docs/.vitepress/.temp/
+ /docs/.vitepress/records/
+ 
+ # Local development files
+diff --git a/components.toml b/components.toml
+index 2bbfd70..e1ab73f 100644
+--- a/components.toml
++++ b/components.toml
+@@ -510,3 +510,176 @@ runtime_identifiers = ["ShengPreflight"]
+ build_stage = "firmware"
+ build = []
+ outputs = []
++
++# Community components of the OnePlus 13T iPadOS 27 experiment (ios27-experiment/, drivers and kits are local).
++[[component]]
++id = "BootProgress"
++kind = "driver"
++function = "BootProgress community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/BootProgress"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = []
++source_files = ["BootProgress.c", "PeripheralStatus.h", "RamoopsLog.c", "GunyahWdog.c", "UfsLog.c"]
++runtime_identifiers = ["BootProgress"]
++build_stage = "embedded"
++build = []
++outputs = []
++
++[[component]]
++id = "NativeKeyStoreEvents"
++kind = "driver"
++function = "NativeKeyStoreEvents community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/NativeKeyStoreEvents"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = []
++source_files = ["NativeKeyStoreEvents.cpp"]
++runtime_identifiers = ["NativeKeyStoreEvents"]
++build_stage = "embedded"
++build = []
++outputs = []
++
++[[component]]
++id = "NativeRamBlock"
++kind = "driver"
++function = "NativeRamBlock community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/NativeRamBlock"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = ["PaganiVerifiedRoot"]
++source_files = ["NativeRamBlock.cpp"]
++runtime_identifiers = ["NativeRamBlock"]
++build_stage = "embedded"
++build = []
++outputs = []
++
++[[component]]
++id = "NativeUfs"
++kind = "driver"
++function = "Read-only SM8750 UFS root windows"
++scope = "sm8750"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/NativeUfs"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = ["Sm8750Platform", "PaganiVerifiedRoot"]
++source_files = ["NativeUfs.cpp"]
++runtime_identifiers = ["NativeUfs"]
++build_stage = "embedded"
++build = []
++outputs = []
++
++[[component]]
++id = "PaganiArmCpu"
++kind = "driver"
++function = "PaganiArmCpu community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/PaganiArmCpu"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = ["PaganiArmDTPlatform"]
++source_files = ["ArmCpu.cpp"]
++runtime_identifiers = ["ArmCpu"]
++build_stage = "kernel"
++build = ["build-arm-platform.py"]
++outputs = ["build/armcpu/libArmCpu.a", "build/armdt-platform/libArmDTPlatform.a"]
++
++[[component]]
++id = "PaganiArmDTPlatform"
++kind = "driver"
++function = "PaganiArmDTPlatform community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/PaganiArmDTPlatform"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = []
++source_files = ["ArmDTPlatform.cpp"]
++runtime_identifiers = ["ArmDTPlatform"]
++build_stage = "embedded"
++build = []
++outputs = []
++
++[[component]]
++id = "PaganiDarwinBoot"
++kind = "driver"
++function = "PaganiDarwinBoot community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "drivers/PaganiDarwinBoot"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = []
++source_files = []
++runtime_identifiers = ["DarwinBoot"]
++build_stage = "firmware"
++build = []
++outputs = []
++
++[[component]]
++id = "PaganiVerifiedRoot"
++kind = "kit"
++function = "PaganiVerifiedRoot community implementation"
++scope = "community"
++repository = "https://github.com/IssacL04/UniXNU-Pagani-Drivers.git"
++revision = "14f50fce9778a8bb19ec6b0b7dc199863526c996"
++path = "kits/PaganiVerifiedRoot"
++hardware = ["OnePlus 13T PKX110"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = []
++source_files = []
++runtime_identifiers = ["VerifiedRoot"]
++build_stage = "embedded"
++build = []
++outputs = []
++
++[[component]]
++id = "Sm8750Platform"
++kind = "kit"
++function = "SM8750 GCC, SMMU, RPMh, SPI timing, SPMI observer and DSI FIFO operations"
++scope = "sm8750"
++repository = "https://github.com/IssacL04/UniXNU-sm8750-common.git"
++revision = "b79d675e522383c29131ccda8529fda45e1f2852"
++path = "kits/Sm8750Platform"
++hardware = ["SM8750"]
++os_abi = ["ipados-27.0.1-24A446"]
++board_dependencies = ["See the OnePlus 13T porting record for inputs and verification limits"]
++verified_devices = []
++dependencies = []
++source_files = []
++runtime_identifiers = ["Sm8750Platform"]
++build_stage = "embedded"
++build = []
++outputs = []
++
+diff --git a/kits/XnuPrelink b/kits/XnuPrelink
+--- a/kits/XnuPrelink
++++ b/kits/XnuPrelink
+@@ -1 +1 @@
+-Subproject commit b1888c12456c46a2226d63c794465dfcee08d465
++Subproject commit b1888c12456c46a2226d63c794465dfcee08d465-dirty
+diff --git a/package/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c b/package/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c
+index 213602a..4a1b15d 100644
+--- a/package/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c
++++ b/package/UniXNUPkg/Driver/UniXNUDxe/UniXNUDxe.c
+@@ -226,7 +226,7 @@ UniXNUDxeEntry (
+   }
+ 
+   Status = gRT->SetVariable (EFI_BOOT_ORDER_VARIABLE_NAME, &gEfiGlobalVariableGuid, OPTION_ATTRIBUTES, Out * sizeof (UINT16), NewOrder);
+-  DEBUG ((DEBUG_INFO, "UniXNUDxe: Boot%04x first in BootOrder: %r\n", Number, Status));
++  DEBUG ((DEBUG_WARN, "UniXNUDxe: Boot%04x first in BootOrder: %r\n", Number, Status));
+ 
+   FreePool (NewOrder);
+   if (Order != NULL) {
+diff --git a/package/UniXNUPkg/Library/UniXNULib/Config.c b/package/UniXNUPkg/Library/UniXNULib/Config.c
+index ed39c6b..30706b0 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/Config.c
++++ b/package/UniXNUPkg/Library/UniXNULib/Config.c
+@@ -1583,11 +1583,23 @@ UniXNUConfigLoad (
+     }
+ 
+     if (AddFallbackLoaders (Config, ImageHandle) == 0) {
++      CHAR8  BootStatus[sizeof (Config->Notice)];
++      UINTN  BootStatusSize;
++
+       //
+       // Only the actions are left. Say so instead of showing a menu that
+       // looks complete.
+       //
+       AsciiStrCpyS (Config->Notice, sizeof (Config->Notice), "no boot entry found");
++      BootStatusSize = sizeof (BootStatus);
++      Status = gRT->GetVariable (L"UniXNUBootStatus", &gUniXNUPkgTokenSpaceGuid,
++                      NULL, &BootStatusSize, BootStatus);
++      if (!EFI_ERROR (Status) && (BootStatusSize > 1) && (BootStatusSize <= sizeof (BootStatus)) &&
++          (BootStatus[BootStatusSize - 1] == '\0')) {
++        AsciiStrCpyS (Config->Notice, sizeof (Config->Notice), BootStatus);
++        Config->Timeout = -1; // Keep the platform failure visible when input is available.
++        Config->FallbackTimeout = 300;
++      }
+       UniXNULog ("config: no boot entry found");
+     }
+ 
+diff --git a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+index 7a395a8..e16dd9a 100644
+--- a/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
++++ b/package/UniXNUPkg/Library/UniXNULib/UniXNULib.inf
+@@ -50,6 +50,7 @@
+   gFdtTableGuid                   ## SOMETIMES_CONSUMES ## SOMETIMES_PRODUCES
+   gLinuxEfiInitrdMediaGuid        ## SOMETIMES_PRODUCES
+   gUniXNUBlockSliceGuid        ## SOMETIMES_PRODUCES
++  gUniXNUPkgTokenSpaceGuid     ## SOMETIMES_CONSUMES ## Variable: UniXNUBootStatus
+ 
+ [Protocols]
+   gEfiAcpiTableProtocolGuid         ## SOMETIMES_CONSUMES
+diff --git a/scripts/build-fileset-release-reference.py b/scripts/build-fileset-release-reference.py
+index f70ceea..71dd678 100644
+--- a/scripts/build-fileset-release-reference.py
++++ b/scripts/build-fileset-release-reference.py
+@@ -132,6 +132,9 @@ def main():
+     # comparison kernel never runs, the prelink step reads its layout.
+     build_log = (output / f'{mode}-build.log').read_text()
+     stub_names = sorted(set(re.findall(r'^\s+"(_(?:native_[a-z0-9_]+|boot_log_rounds))"', build_log, re.M)))
++    # The drivers are compiled once, with the DEVELOPMENT record and its -fsanitize=signed-integer-overflow, and force-loaded here.
++    # RELEASE has no minimal UBSan runtime. The first link stops at the forced exports, so its log cannot name these.
++    stub_names = sorted(set(stub_names) | {'___ubsan_handle_add_overflow_minimal', '___ubsan_handle_sub_overflow_minimal'})
+     if stub_names:
+         (output / 'native-stubs.c').write_text(''.join(f'long {name[1:]};\n' for name in stub_names))   # the linker names carry the leading underscore
+         iphoneos = subprocess.check_output(['xcrun', '--sdk', 'iphoneos', '--show-sdk-path'], text=True).strip()
+diff --git a/scripts/build-xnu-4k-baseline.sh b/scripts/build-xnu-4k-baseline.sh
+index 8f9d3cf..c214d51 100755
+--- a/scripts/build-xnu-4k-baseline.sh
++++ b/scripts/build-xnu-4k-baseline.sh
+@@ -75,32 +75,48 @@ if [ "$BOOTSTRAP" != 0 ] && [ "$BOOTSTRAP" != 1 ]; then
+   exit 1
+ fi
+ BOOT_PROGRESS=${XNU_BOOT_PROGRESS:-0}
++EARLY_BOOT_PROGRESS=${XNU_EARLY_BOOT_PROGRESS:-0}
++if [ "$EARLY_BOOT_PROGRESS" != 0 ] && [ "$EARLY_BOOT_PROGRESS" != 1 ]; then
++  echo 'XNU_EARLY_BOOT_PROGRESS must be 0 or 1' >&2
++  exit 1
++fi
++if [ "$EARLY_BOOT_PROGRESS" = 1 ] && { [ "$BOOT_PROGRESS" != 1 ] || [ "${XNU_ARMCPU:-0}" != 1 ] || [ "${XNU_ARM_DT_PLATFORM:-0}" != 1 ]; }; then
++  echo 'Early boot progress requires BOOT_PROGRESS, ArmCpu and ArmDTPlatform' >&2
++  exit 1
++fi
+ if [ "$BOOT_PROGRESS" != 0 ] && [ "$BOOT_PROGRESS" != 1 ]; then
+   echo 'XNU_BOOT_PROGRESS must be 0 or 1' >&2
+   exit 1
+ fi
+ if [ "$BOOT_PROGRESS" = 1 ]; then
+-  # The board diagnostics use the UFS/owner-root paths; they do not touch the Virtio block driver.
+-  if [ "${XNU_NATIVE_UFS:-0}" != 1 ] || [ "${XNU_OWNER_ROOT_AUDIT:-0}" != 1 ] || \
+-     [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; then
++  # The board diagnostics use the UFS/owner-root paths; they do not touch the Virtio block driver. iPadOS 27 reaches UFS through the
++  # source storage archive instead of XNU_NATIVE_UFS. The bootstrap pass of a board with early progress has no root yet.
++  if [ "$EARLY_BOOT_PROGRESS" != 1 ] && { { [ "${XNU_NATIVE_UFS:-0}" != 1 ] && [ "${XNU_SOURCE_STORAGE:-0}" != 1 ]; } || \
++     [ "${XNU_OWNER_ROOT_AUDIT:-0}" != 1 ] || [ "${XNU_SOURCE_CORECRYPTO14:-0}" != 1 ]; }; then
+     echo 'Boot progress requires the audited UFS/owner-root and source-corecrypto build' >&2
+     exit 1
+   fi
+   python3 scripts/build-boot-progress.py
+ fi
+-python3 - "$BOOT_PROGRESS" <<'PY'
++python3 - "$BOOT_PROGRESS" "$EARLY_BOOT_PROGRESS" <<'PY'
+ from pathlib import Path
+ import hashlib, sys
+ mode = sys.argv[1]
+ out = Path('build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837')
+ stamp = out / '.boot-progress-mode'
+-identity = mode + ':' + (hashlib.sha256(Path('build/boot-progress/libBootProgress.a').read_bytes()).hexdigest() if mode == '1' else 'disabled')
++identity = mode + ':' + sys.argv[2] + ':' + (hashlib.sha256(Path('build/boot-progress/libBootProgress.a').read_bytes()).hexdigest() if mode == '1' else 'disabled')
+ if not stamp.exists() or stamp.read_text() != identity:
+-    for directory, names in [('osfmk', ['arm_init','startup','video_console','serial_console','sleh']),
+-                             ('bsd', ['bsd_init','kern_exec','kern_exit']), ('pexpert', ['pe_kprintf'])]:
++    # Every object whose source tests XNU_BOOT_PROGRESS: make does not track CFLAGS, so after the bootstrap pass (=0) an
++    # object left out here keeps its disabled build (bsd_kern, kern_sig: the device repository's crash-trace.patch; sched_prim, cpu,
++    # cpu_common, kdebug: its phone-stall-probe.patch).
++    for directory, names in [('osfmk', ['start','arm_init','startup','video_console','serial_console','sleh','debug','printf',
++                                        'bsd_kern','sched_prim','cpu','cpu_common','pmap','vm_resident','vm_init','arm_vm_init']),
++                             ('bsd', ['bsd_init','kern_exec','kern_exit','kern_sig','kdebug']), ('pexpert', ['pe_kprintf'])]:
+         for name in names:
+             (out / directory / 'DEVELOPMENT' / (name + '.o')).unlink(missing_ok=True)
++    (out / 'iokit/DEVELOPMENT/IOKitBSDInit.cpo').unlink(missing_ok=True)
+     (out / 'mach.development.bcm2837.unstripped').unlink(missing_ok=True)
++    (out / 'mach.development.bcm2837.unstripped.noctf').unlink(missing_ok=True)
+     out.mkdir(parents=True, exist_ok=True)
+     stamp.write_text(identity)
+ PY
+@@ -564,10 +580,12 @@ if [ "$NATIVE_ARCH_TIMER" = 1 ] && [ "${XNU_ARMCPU:-0}" != 1 ]; then
+   echo 'Architectural timer entry requires the actual ArmCpu interrupt provider' >&2
+   exit 1
+ fi
+-EXTRA_MAKE_ARGS+=("start.o_SFLAGS_ADD=-DXNU_NATIVE_ARCH_TIMER=$NATIVE_ARCH_TIMER")
++EXTRA_MAKE_ARGS+=("start.o_SFLAGS_ADD=-DXNU_NATIVE_ARCH_TIMER=$NATIVE_ARCH_TIMER -DXNU_EARLY_BOOT_PROGRESS=$EARLY_BOOT_PROGRESS")
++EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_NATIVE_ARCH_TIMER=$NATIVE_ARCH_TIMER"
+ NATIVE_TIMER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.native-arch-timer-mode
+ if [ "$(cat "$NATIVE_TIMER_STAMP" 2>/dev/null || echo 0)" != "$NATIVE_ARCH_TIMER" ]; then
+   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/osfmk/DEVELOPMENT/start.o"
++  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/pexpert/DEVELOPMENT/pe_identify_machine.o"
+   printf '%s\n' "$NATIVE_ARCH_TIMER" > "$NATIVE_TIMER_STAMP"
+ fi
+ NATIVE_PAN=${XNU_NATIVE_PAN:-0}
+@@ -636,7 +654,7 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
+     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ARMCPU_ARCHIVE"
+   fi
+   if [ "${XNU_NATIVE_UFS:-0}" = 1 ]; then
+-    UFS_ARCHIVE=$ROOT/build/sheng-ufs/libShengUfs.a
++    UFS_ARCHIVE=${XNU_NATIVE_UFS_ARCHIVE:-$ROOT/build/sheng-ufs/libShengUfs.a}
+     test -f "$UFS_ARCHIVE"
+     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$UFS_ARCHIVE"
+     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $UFS_ARCHIVE"
+@@ -644,7 +662,7 @@ if [ "${XNU_SOURCE_CORECRYPTO14:-0}" = 1 ] && [ "$BOOTSTRAP" = 0 ]; then
+   if [ "${XNU_NATIVE_ADRENO:-0}" = 1 ]; then
+     # NativeAdreno plus its kits (scripts/build-native-adreno-kits.py). No personality is installed: the
+     # board probe calls NativeAdrenoGmuContextBringup directly once it has powered the GPU CX domain.
+-    ADRENO_ARCHIVE=$ROOT/build/adreno740/libAdreno740.a
++    ADRENO_ARCHIVE=${XNU_NATIVE_ADRENO_ARCHIVE:-$ROOT/build/adreno740/libAdreno740.a}
+     test -f "$ADRENO_ARCHIVE"
+     KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES -Wl,-force_load,$ADRENO_ARCHIVE"
+     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $ADRENO_ARCHIVE"
+@@ -716,7 +734,7 @@ PY_GPU_BROKER
+     KERNEL_ARCHIVE_DEPENDENCIES="$KERNEL_ARCHIVE_DEPENDENCIES $CONSOLE_ARCHIVE"
+   fi
+   if [ "$NATIVE_RAM_BLOCK" = 1 ] && [ "${XNU_SOURCE_STORAGE:-0}" != 1 ]; then
+-    RAM_BLOCK_ARCHIVE=$ROOT/build/ram-block/libRamBlock.a
++    RAM_BLOCK_ARCHIVE=${XNU_NATIVE_RAM_BLOCK_ARCHIVE:-$ROOT/build/ram-block/libRamBlock.a}
+     test -f "$RAM_BLOCK_ARCHIVE"
+     if [ "${XNU_NATIVE_VIRTIO_BLOCK:-0}" = 1 ]; then
+       # Both transports import the same original class. Keep one exact alias
+@@ -736,7 +754,7 @@ first, second = [record['bindings'] for record in records]
+ if any(first.get(name) != value for name, value in second.items()):
+     raise SystemExit('RAM transport imports must match the already linked original storage bindings')
+ PY_BINDINGS
+-      RAM_BLOCK_OBJECT=$ROOT/build/ram-block/NativeRamBlock.o
++      RAM_BLOCK_OBJECT=${RAM_BLOCK_ARCHIVE%/*}/NativeRamBlock.o
+       test -f "$RAM_BLOCK_OBJECT"
+       KERNEL_EXTRA_ARCHIVES="$KERNEL_EXTRA_ARCHIVES $RAM_BLOCK_OBJECT"
+     else
+@@ -782,7 +800,7 @@ fi
+ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/software-aes/libSoftwareAES.a}" \
+   "${XNU_NATIVE_VIRTIO_BLOCK:-0}" "${XNU_NATIVE_VIRTIO_BLOCK_ARCHIVE:-$ROOT/build/virtio-mmio-block/libVirtioMmioBlock.a}" \
+   "$OWNER_ROOT_PROBE" "${XNU_VERIFIED_ROOT_ARCHIVE:-$ROOT/build/verified-root-xnu/libVerifiedRootProbe.a}" \
+-  "$NATIVE_RAM_BLOCK" "$ROOT/build/ram-block/libRamBlock.a" \
++  "$NATIVE_RAM_BLOCK" "${XNU_NATIVE_RAM_BLOCK_ARCHIVE:-$ROOT/build/ram-block/libRamBlock.a}" \
+   "$ADRENO_FIRMWARE_PROBE" "$ROOT/build/adreno-firmware-probe/libAdrenoFirmwareProbe.a" \
+   "$ADRENO_PM4_PROBE" "$ROOT/build/adreno-pm4-probe/libAdrenoPM4Probe.a" \
+   "$SMMU4K_PROBE" "$ROOT/build/smmu4k-probe/libArmSmmu4KProbe.a" \
+@@ -790,7 +808,7 @@ python3 - "${XNU_NATIVE_AES:-0}" "${XNU_NATIVE_AES_ARCHIVE:-$ROOT/build/software
+   "$NATIVE_VIRTIO_CONSOLE" "$ROOT/build/virtio-mmio-console/libVirtioMmioConsole.a" \
+   "$NATIVE_OFFLINE_GPU" "$ROOT/build/native-offline-gpu/libNativeOfflineGPU.late.a" \
+   "$SHENG_PMGR" "$ROOT/build/sheng-platform-power/libShengPlatformPower.a" \
+-  "${XNU_NATIVE_ADRENO:-0}" "$ROOT/build/adreno740/libAdreno740.a" <<'PY'
++  "${XNU_NATIVE_ADRENO:-0}" "${XNU_NATIVE_ADRENO_ARCHIVE:-$ROOT/build/adreno740/libAdreno740.a}" <<'PY'
+ import hashlib
+ from pathlib import Path
+ import sys
+@@ -816,7 +834,7 @@ if not stamp.exists() or stamp.read_text() != identity:
+     directory.mkdir(parents=True, exist_ok=True)
+     stamp.write_text(identity)
+ PY
+-EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS"
++EXTRA_CFLAGS="$EXTRA_CFLAGS -DXNU_BOOT_PROGRESS=$BOOT_PROGRESS -DXNU_EARLY_BOOT_PROGRESS=$EARLY_BOOT_PROGRESS"
+ make -C .cache/xnu-work "${XNU_BUILD_TARGET:-build}" SDKROOT="${XNU_SDKROOT:-iphoneos}" ARCH_CONFIGS=ARM64 \
+   MACHINE_CONFIGS=BCM2837 KERNEL_CONFIGS=DEVELOPMENT \
+   ARCH_STRING_FOR_CURRENT_MACHINE_CONFIG="$XNU_ARCH_STRING" LARGE_MEMORY_DEFINE=-UARM_LARGE_MEMORY \
+diff --git a/scripts/unixnu/bootimg.py b/scripts/unixnu/bootimg.py
+index 259fb29..975bf26 100644
+--- a/scripts/unixnu/bootimg.py
++++ b/scripts/unixnu/bootimg.py
+@@ -1,4 +1,4 @@
+-"""Android boot image: gzip(BootShim + UEFI FD) with the device tree appended, plus an optional ramdisk.
++"""Android boot image: gzip(BootShim + UEFI FD + optional payload), DTBs and an optional ramdisk.
+ 
+ Inputs are a Mu-Silicium checkout (BootShim sources, Resources/Configs/<device>.toml, mkbootimg.py),
+ the built firmware volume and a compiled device tree. The image is meant for "fastboot boot" only.
+@@ -20,13 +20,31 @@ DEFAULTS = {'header_version': 0, 'base': 0, 'kernel_offset': 0x8000, 'tags_offse
+ MKBOOTIMG_FLAGS = ('base', 'kernel_offset', 'tags_offset', 'pagesize', 'header_version', 'ramdisk_offset', 'second_offset', 'cmdline')
+ 
+ 
+-def compile_shim(uefi, base, size, requires_header, scratch):
++def split_dtb(data):
++    """Preserve concatenated stock DTBs so the bootloader can select its hardware variant."""
++    trees = []
++    offset = 0
++    while offset < len(data):
++        if len(data) - offset < 40 or data[offset:offset + 4] != b'\xd0\x0d\xfe\xed':
++            raise Error('invalid compiled device tree')
++        size = struct.unpack_from('>I', data, offset + 4)[0]
++        if size < 40 or size > len(data) - offset:
++            raise Error('invalid compiled device tree size')
++        trees.append(data[offset:offset + size])
++        offset += size
++    if not trees:
++        raise Error('empty compiled device tree')
++    return trees
++
++
++def compile_shim(uefi, base, size, requires_header, scratch, payload_size=0):
+     clang, objcopy, nm = tool('clang'), tool('llvm-objcopy', 'brew install llvm'), tool('llvm-nm', 'brew install llvm')
+     source = uefi / 'BootShim/BootShim.S'
+     if not source.is_file():
+         raise Error(f'{source} missing: --uefi must be a Mu-Silicium checkout')
+     obj = scratch / 'shim.o'
+     run([clang, '--target=aarch64-none-elf', '-c', f'-DFD_BASE={base}', f'-DFD_SIZE={size}',
++         f'-DEMBEDDED_PAYLOAD_SIZE={payload_size}',
+          f'-DREQUIRES_KERNEL_HEADER={int(requires_header)}', source, '-o', obj], capture=True)
+     run([objcopy, '-O', 'binary', obj, scratch / 'shim.bin'], capture=True)
+     shim = (scratch / 'shim.bin').read_bytes()
+@@ -34,8 +52,8 @@ def compile_shim(uefi, base, size, requires_header, scratch):
+     offset = next((int(line.split()[0], 16) for line in symbols.splitlines() if line.endswith(' _Payload')), None)
+     if offset != len(shim):
+         raise Error('a literal pool or padding separates the _Payload label from the appended firmware volume')
+-    if requires_header and (shim[56:60] != b'ARM\x64' or struct.unpack_from('<QQ', shim, 8) != (base, len(shim) + size)):
+-        raise Error('the ARM64 image header does not describe the shim plus the firmware volume')
++    if requires_header and (shim[56:60] != b'ARM\x64' or struct.unpack_from('<QQ', shim, 8) != (base, len(shim) + size + payload_size)):
++        raise Error('the ARM64 image header does not describe the shim, firmware and embedded payload')
+     return shim
+ 
+ 
+@@ -84,22 +102,25 @@ def build(ctx, uefi, fd, dtb, ramdisk=None, output=None):
+         raise Error('the Mu-Silicium device config has no [uefi_fd] base and size')
+     if len(firmware) != size:
+         raise Error(f'firmware volume is {len(firmware):#x} bytes, the device config says {size:#x}')
++    embedded = ctx.board.get('bootimg', {}).get('embed_payload', False)
++    if ramdisk and not Path(ramdisk).is_file():
++        raise Error(f'ramdisk not found: {ramdisk}')
++    payload = Path(ramdisk).read_bytes() if ramdisk and embedded else b''
++    if embedded and (not payload or not requires_header):
++        raise Error('embed_payload needs a nonempty --ramdisk and an ARM64 image header')
+     out = Path(output) if output else ctx.work / 'boot/boot.img'
+     out.parent.mkdir(parents=True, exist_ok=True)
+     with tempfile.TemporaryDirectory(prefix='unixnu-bootimg-') as scratch_name:
+         scratch = Path(scratch_name)
+-        shim = compile_shim(uefi, base, size, requires_header, scratch)
+-        tree = patch_dtb(Path(dtb).read_bytes(), ctx.board.get('bootimg', {}).get('dtb_node', []), scratch)
+-        if tree[:4] != b'\xd0\x0d\xfe\xed' or struct.unpack_from('>I', tree, 4)[0] != len(tree):
+-            raise Error('invalid compiled device tree')
+-        combined = shim + firmware
++        shim = compile_shim(uefi, base, size, requires_header, scratch, len(payload))
++        tree = b''.join(patch_dtb(blob, ctx.board.get('bootimg', {}).get('dtb_node', []), scratch)
++                        for blob in split_dtb(Path(dtb).read_bytes()))
++        combined = shim + firmware + payload
+         kernel = gzip.compress(combined, mtime=0) + tree
+         kernel_path = scratch / 'Image.gz-dtb'
+         kernel_path.write_bytes(kernel)
+-        if ramdisk:
++        if ramdisk and not embedded:
+             ramdisk_path = Path(ramdisk)
+-            if not ramdisk_path.is_file():
+-                raise Error(f'ramdisk not found: {ramdisk_path}')
+         else:
+             ramdisk_path = scratch / 'ramdisk'
+             ramdisk_path.write_bytes(b'')
+@@ -110,7 +131,8 @@ def build(ctx, uefi, fd, dtb, ramdisk=None, output=None):
+         run(command, capture=True)
+         report = verify(out, combined, tree, ramdisk_path, image)
+     report.update(image_sha256=sha256_file(out), image_bytes=out.stat().st_size, fd_sha256=sha256_file(fd),
+-                  dtb_sha256=sha256_file(dtb), shim_bytes=len(shim), hardware_tested=False)
++                  dtb_sha256=sha256_file(dtb), shim_bytes=len(shim), hardware_tested=False,
++                  embedded_payload_bytes=len(payload))
+     (out.parent / 'boot.json').write_text(json.dumps(report, indent=2) + '\n')
+     log(f'bootimg: {out} ({out.stat().st_size} bytes)')
+     return out
+@@ -119,17 +141,43 @@ def build(ctx, uefi, fd, dtb, ramdisk=None, output=None):
+ def verify(path, combined, tree, ramdisk_path, image):
+     """Unpack the image and compare every part with its input."""
+     data = Path(path).read_bytes()
+-    kernel_size, kernel_address, ramdisk_size, _, second_size, _, tags, page, version, _ = struct.unpack_from('<10I', data, 8)
+-    if data[:8] != b'ANDROID!' or second_size or version != image['header_version'] or page != image['pagesize']:
++    if len(data) < 44 or data[:8] != b'ANDROID!':
++        raise Error('invalid or truncated boot image header')
++    version = struct.unpack_from('<I', data, 40)[0]
++    if version != image['header_version'] or version not in range(5):
+         raise Error('boot image header does not match the requested parameters')
+-    if kernel_address != image['base'] + image['kernel_offset'] or tags != image['base'] + image['tags_offset']:
+-        raise Error('boot image load addresses do not match the requested offsets')
++    addresses = {}
++    signature_size = 0
++    if version >= 3:
++        kernel_size, ramdisk_size, _, header_size = struct.unpack_from('<4I', data, 8)
++        page = 4096
++        if (header_size != (1584 if version == 4 else 1580) or len(data) < page or
++                data[24:40] != bytes(16) or image['pagesize'] != page):
++            raise Error('invalid v3/v4 boot image header')
++        if version == 4:
++            signature_size = struct.unpack_from('<I', data, 1580)[0]
++    else:
++        kernel_size, kernel_address, ramdisk_size, _, second_size, _, tags, page = struct.unpack_from('<8I', data, 8)
++        if second_size or page != image['pagesize'] or page < (1632, 1648, 1660)[version]:
++            raise Error('boot image header does not match the requested parameters')
++        if kernel_address != image['base'] + image['kernel_offset'] or tags != image['base'] + image['tags_offset']:
++            raise Error('boot image load addresses do not match the requested offsets')
++        addresses = {'kernel_address': hex(kernel_address), 'tags_address': hex(tags)}
++    start = page * (1 + -(-kernel_size // page))
++    end = start + ramdisk_size
++    if page + kernel_size > len(data) or end > len(data):
++        raise Error('boot image payload is truncated')
++    if version >= 3 and page * -(-end // page) + page * -(-signature_size // page) != len(data):
++        raise Error('boot image signature or trailing layout does not match its header')
+     kernel = data[page:page + kernel_size]
+     unpacker = zlib.decompressobj(16 + zlib.MAX_WBITS)
+-    if unpacker.decompress(kernel) != combined or not unpacker.eof or unpacker.unused_data != tree:
++    try:
++        unpacked = unpacker.decompress(kernel)
++    except zlib.error as error:
++        raise Error(f'invalid boot image gzip: {error}') from None
++    if unpacked != combined or not unpacker.eof or unpacker.unused_data != tree:
+         raise Error('gzip, firmware and appended device tree do not round-trip')
+-    start = page * (1 + -(-kernel_size // page))
+     if data[start:start + ramdisk_size] != Path(ramdisk_path).read_bytes():
+         raise Error('ramdisk bytes differ')
+     return {'kernel_sha256': hashlib.sha256(kernel).hexdigest(), 'ramdisk_bytes': ramdisk_size,
+-            'header_version': version, 'kernel_address': hex(kernel_address), 'tags_address': hex(tags)}
++            'header_version': version, **addresses}
+diff --git a/scripts/unixnu/cli.py b/scripts/unixnu/cli.py
+index 2784bcf..88fd3a2 100644
+--- a/scripts/unixnu/cli.py
++++ b/scripts/unixnu/cli.py
+@@ -65,7 +65,7 @@ def parser():
+     i = sub.add_parser('bootimg', parents=[c], help='pack the boot image from the firmware volume and a device tree')
+     i.add_argument('--fd', metavar='FILE', help='firmware volume with UniXNU, DarwinBoot and payload filesystem support (default: build firmware output under --uefi)')
+     i.add_argument('--dtb', metavar='FILE', help='compiled device tree; or UNIXNU_DTB')
+-    i.add_argument('--ramdisk', metavar='FILE', help='ramdisk image, or none (default: the payload step output when present, else empty)')
++    i.add_argument('--ramdisk', metavar='FILE', help='payload image; placed inside the kernel when bootimg.embed_payload is true, otherwise in the ramdisk (default: payload output, else empty)')
+     i.add_argument('-o', '--output', metavar='FILE', help='output (default: out/<device>/boot/boot.img)')
+     w = sub.add_parser('ipsw', parents=[c], help='show or extract the components of the target IPSW')
+     w.add_argument('action', choices=('info', 'fetch'))
+@@ -163,7 +163,10 @@ def cmd_build(ctx):
+         runtime.prepare(ctx, kernel_build='kernel' in steps)
+     if 'kernel' in steps:
+         kernel.build(ctx, modules)
+-        kernel.prelink(ctx)
++        if ctx.board.get('kernel', {}).get('source_only', False):
++            kernel.export_source(ctx)
++        else:
++            kernel.prelink(ctx)
+     elif 'prelink' in steps:
+         kernel.prelink(ctx)
+     if 'package' in steps:
+@@ -185,9 +188,7 @@ def cmd_bootimg(ctx):
+         ramdisk = expand(ctx.args.ramdisk)
+     elif not ctx.args.ramdisk and payload.paths(ctx)[1].is_file():
+         ramdisk = payload.paths(ctx)[1]
+-        log(f'ramdisk: {ramdisk} (use --ramdisk none for an empty one)')
+-    if ramdisk is None:
+-        log('ramdisk: empty; build payload or pass --ramdisk FILE to include configured boot entries')
++        log(f'payload input: {ramdisk}')
+     bootimg.build(ctx, uefi, fd, dtb, ramdisk, expand(ctx.args.output) if ctx.args.output else None)
+ 
+ 
+diff --git a/scripts/unixnu/kernel.py b/scripts/unixnu/kernel.py
+index ac2723c..f632e20 100644
+--- a/scripts/unixnu/kernel.py
++++ b/scripts/unixnu/kernel.py
+@@ -143,6 +143,9 @@ def build_archives(ctx, env):
+     if not ctx.need_config().get('XNU_BUILD_ARCHIVES'):
+         return
+     env = dict(env, PATH=toolchain_path(env.get('PATH')), UNIXNU_DEVICE=str(ctx.device))
++    prelink = ctx.board.get('kernel', {}).get('prelink', {}).get('tool')
++    if prelink:
++        env['PYTHONPATH'] = os.pathsep.join([str((ctx.tree / prelink).parent), env.get('PYTHONPATH', '')])
+     for index, (kind, entry) in enumerate(archive_plan(ctx), 1):
+         if kind == 'component':
+             spec = entry
+@@ -196,7 +199,7 @@ def build(ctx, modules):
+         # skip the archive checks and link without the archives, so it stops at the link and only the records are
+         # required of it.
+         log('kernel: bootstrap pass for the compile records')
+-        subprocess_env = {**env, 'XNU_BOOT_PROGRESS': '0', 'XNU_BOOTSTRAP': '1'}
++        subprocess_env = {**env, 'XNU_BOOT_PROGRESS': '0', 'XNU_EARLY_BOOT_PROGRESS': '0', 'XNU_BOOTSTRAP': '1'}
+         try:
+             run(['bash', script], cwd=ctx.tree, env=subprocess_env, log_file=ctx.logs / 'kernel-bootstrap.log')
+         except Error:
+@@ -251,6 +254,30 @@ def check_prelink_regressions(record, policy):
+         raise Error('prelink lacks required absolute adapter branch relocations')
+ 
+ 
++def export_source(ctx):
++    """Publish the source kernel for boards bringing up XNU without a kernelcache."""
++    if ctx.board.get('kernel', {}).get('prelink'):
++        raise Error('source_only and [kernel.prelink] cannot be used together')
++    source = ctx.tree / 'build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/mach.development.bcm2837.unstripped.noctf'
++    if not source.is_file():
++        raise Error(f'source kernel not found: {source}')
++    with source.open('rb') as stream:
++        header = stream.read(32)
++    if len(header) != 32 or struct.unpack_from('<4I', header) != (0xfeedfacf, 0x100000c, 0, 2):
++        raise Error('source kernel must be an ordinary ARM64 Mach-O executable')
++    output = ctx.work / 'kernel/kernel.macho'
++    output.parent.mkdir(parents=True, exist_ok=True)
++    temporary = output.with_suffix('.macho.tmp')
++    try:
++        shutil.copyfile(source, temporary)
++        temporary.replace(output)
++    finally:
++        temporary.unlink(missing_ok=True)
++    output.with_suffix('.json').unlink(missing_ok=True)  # A previous prelink report no longer describes this image.
++    log(f'kernel: {output} (source only; no prelinked Apple drivers or root filesystem)')
++    return output
++
++
+ def prelink(ctx):
+     """Produce out/<device>/kernel/kernel.macho from the XNU build and the original kernelcache."""
+     spec = ctx.board.get('kernel', {}).get('prelink')
+diff --git a/scripts/unixnu/userdata.py b/scripts/unixnu/userdata.py
+index 9a4f34a..815d40f 100644
+--- a/scripts/unixnu/userdata.py
++++ b/scripts/unixnu/userdata.py
+@@ -43,6 +43,24 @@ def paths(ctx):
+     return out, out / 'userdata-root.img', out / 'userdata-root.json'
+ 
+ 
++def flash_command(partition, image, base_mib=None):
++    """How to write the image. With base_mib the image lives inside the partition behind another system's root:
++    fastboot flash would start at the partition's first block and overwrite that root."""
++    if base_mib is None:
++        return f'fastboot flash {partition} {image}'
++    if not isinstance(base_mib, int) or base_mib <= 0 or base_mib % 4:
++        raise Error('userdata.base_mib must be a positive multiple of 4')
++    return (f'NOT fastboot flash, it would overwrite the system at the start of {partition}. From Android as root: '
++            f'dd if={image} of=/dev/block/by-name/{partition} bs=4194304 seek={base_mib // 4} conv=notrunc,fsync')
++
++
++def target_partition(spec):
++    name = spec.get('partition', 'userdata')
++    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_]{1,35}', name):
++        raise Error('userdata.partition must be an exact GPT name of 1 to 35 ASCII letters, digits or underscores')
++    return name
++
++
+ def image_size(dmg):
+     if platform.system() != 'Darwin':
+         return udif.Image(dmg).size
+@@ -87,6 +105,7 @@ def build(ctx, dry_run=False):
+     spec = ctx.board.get('userdata')
+     if not spec:
+         raise Error('board.toml has no [userdata]')
++    partition = target_partition(spec)
+     if platform.system() == 'Darwin':
+         tool('hdiutil', 'the disk images are attached with macOS hdiutil')
+     source = Ipsw(ctx)
+@@ -107,7 +126,7 @@ def build(ctx, dry_run=False):
+         for window in windows:
+             name, size, _ = source.info(window['component'])
+             log(f'userdata: {window["name"]} would be extracted from {name} ({size >> 20} MiB)')
+-        log('userdata: dry run, nothing extracted or written')
++        log(f'userdata: target partition {partition}, dry run, nothing extracted or written')
+         return None
+     sources = [(window['name'], source.disk_image(window['component'])) for window in windows]
+     layout, cursor = [], MIB
+@@ -177,7 +196,7 @@ def build(ctx, dry_run=False):
+     data = {'image_bytes': total, 'image_sha256': sha256_file(image), 'manifest_sha256': hashlib.sha256(bytes(header)).hexdigest(),
+             'windows': [{'name': n, 'offset': o, 'size': s, 'sha256': d.hex()} for n, o, s, d in entries],
+             'objects': [{'name': n, 'offset': o, 'size': s, 'sha256': d.hex()} for n, o, s, d in object_entries],
+-            'userdata_bytes': capacity, 'flash_command': f'fastboot flash userdata {image}',
++            'userdata_bytes': capacity, 'partition': partition, 'flash_command': flash_command(partition, image, spec.get('base_mib')),
+             'source': 'remote' if source.remote else 'local', 'hardware_tested': False}
+     report.write_text(json.dumps(data, indent=2) + '\n')
+     log(f'userdata: {image}')

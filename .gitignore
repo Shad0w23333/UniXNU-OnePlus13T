@@ -1,0 +1,12 @@
+out/
+out-gpu/
+build/
+.cache/
+runs/
+__pycache__/
+*.img
+*.dbrdisk
+*.bundle
+*.ipsw
+unixnu.local.toml
+.DS_Store

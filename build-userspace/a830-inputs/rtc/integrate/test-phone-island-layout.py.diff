@@ -1,0 +1,37 @@
+--- a/工具/test-phone-island-layout.py
++++ b/工具/test-phone-island-layout.py
+@@ -190,6 +190,15 @@
+         self.assertEqual(calls[1]['board'], board)
+         added, removed = changed_lines(self.box.original, board)
+         self.assertEqual(sorted(removed), ['display-scale = 2'])
++        # /chosen/pagani-build-time: this build's time, or A830_BUILD_TIME.
++        built = [line for line in added if line.startswith('pagani-build-time = ')]
++        self.assertEqual(len(built), 1)
++        seconds = int(built[0].split(' = ')[1])
++        if 'A830_BUILD_TIME' in env:
++            self.assertEqual(seconds, int(env['A830_BUILD_TIME']))
++        else:
++            self.assertGreater(seconds, 1700000000)
++        added.remove(built[0])
+         expected = IDENTITIES[identity] + [f'target-type = "{target}"'] + fixup_line(ci, fixup, env.get('A830_KEYBOARD_F2') != '0')
+         corner = env.get('A830_CORNER_RADIUS')
+         if corner:
+@@ -236,6 +245,18 @@
+         line = check_args([a for a in config['payload']['kernel_args'] if a.split('=', 1)[0] not in names] + args)
+         self.assertLessEqual(len(line), 1000)
+ 
++    def test_build_time(self):
++        """A830_BUILD_TIME replaces the build's time and reaches the ADT as a u32."""
++        board, _, _ = self.check_run('phone-island', 'island', A830_BUILD_TIME='1793400000')
++        self.assertEqual(merged(board)['adt']['chosen']['u32']['pagani-build-time'], 1793400000)
++
++    def test_build_time_out_of_range(self):
++        result, calls, _ = self.box.run('phone-island', A830_BUILD_TIME='4294967296')
++        self.assertNotEqual(result.returncode, 0)
++        self.assertIn('out of range', result.stderr)
++        self.assertEqual(calls, [])
++        self.assertEqual(self.box.board.read_text(), self.box.original, 'board.toml not restored')
++
+     def test_island_apps(self):
+         self.check_run('phone-island-apps', 'island', apps=True)
+         self.assertTrue((self.box.top / '测试镜像/boot-A830-回路-M8桌面-iPhone15Pro灵动岛-系统应用.img').is_file())

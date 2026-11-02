@@ -1,0 +1,24 @@
+sheng-platform-power.patch（xnu-12377 版 SoC 层）
+
+来源：UniXNU-sm8550-common patches/xnu-12377/sheng-platform-power.patch，内容未改，只加这段说明。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+作用：XNU_SHENG_PMGR 打开时在 bsd_init 里调用 sheng_pmgr_run()。13T 沿用 ShengPlatformPower 组件和
+sheng-pmgr 启动参数，名字不改。上游 OS 层 zzz-boot-progress.patch 的一块上下文依赖这几行，
+所以本补丁必须排在 OS 层之前。
+
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+index 6799ecf..7febaca 100644
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -776,6 +776,11 @@ bsd_init(void)
+ 	bsd_init_kprintf("calling bsd_bufferinit\n");
+ 	bsd_bufferinit();
+ 
++#if defined(XNU_SHENG_PMGR) && XNU_SHENG_PMGR
++	extern void sheng_pmgr_run(void);
++	sheng_pmgr_run();
++#endif
++
+ 	/*
+ 	 * Initialize the calendar.
+ 	 */

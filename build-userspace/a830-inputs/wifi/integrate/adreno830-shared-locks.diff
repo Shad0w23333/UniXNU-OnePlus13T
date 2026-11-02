@@ -1,0 +1,82 @@
+--- a/Adreno830/platform/sm8750/Sm8750GpuPower.c
++++ b/Adreno830/platform/sm8750/Sm8750GpuPower.c
+@@ -76,6 +76,32 @@
+     if (s || (old & mask) == value)
+         return s;
+     return wr(c, block, offset, (old & ~mask) | value);
++}
++
++/* GCC_APCS_CLOCK_BRANCH_ENA_VOTE 0x52000 also holds PCIe0's branch votes (PaganiWifi): the two read-modify-writes must not interleave.
++ * The weak lock word of SOC kits/Sm8750Platform/PeripheralIO.h, the protocol its 0x52008 users follow: 0 free, else the holder's tag,
++ * tried every 10 us for at most 50 ms; a holder that never gives it back does not stop the power sequence, the update then goes ahead. */
++__attribute__((weak)) volatile uint32_t sm8750_gcc_vote_owner;
++enum {GccVoteOwner = 0x41383330, GccVoteSteps = 5000};
++
++static Sm8750GpuPowerStatus gcc_gpll0_vote(Ctx *c, uint32_t value)
++{
++    int locked = 0;
++    for (unsigned step = 0; step < GccVoteSteps && !locked; step++) {
++        uint32_t expected = 0;
++        locked = __atomic_compare_exchange_n(&sm8750_gcc_vote_owner, &expected, GccVoteOwner, 0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED);
++        if (!locked) {
++            const Sm8750GpuPowerStatus s = wait_us(c, 10);
++            if (s)
++                return s;
++        }
++    }
++    const Sm8750GpuPowerStatus s = update(c, Sm8750GpuGcc, GccClockVote, Gpll0Votes, value);
++    if (locked) {
++        uint32_t expected = GccVoteOwner;
++        __atomic_compare_exchange_n(&sm8750_gcc_vote_owner, &expected, 0u, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
++    }
++    return s;
+ }
+ 
+ /* Read and compare: on a mismatch the trace already holds this register and its value. */
+@@ -275,7 +301,7 @@
+ 
+     /* GPLL0 (600 MHz, owned by boot firmware) feeds the hub RCG: route it and check its rate. */
+     trace->step = Sm8750GpuStepGpll0;
+-    if ((s = update(c, Sm8750GpuGcc, GccClockVote, Gpll0Votes, Gpll0Votes)) || (s = wait_us(c, 10)) ||
++    if ((s = gcc_gpll0_vote(c, Gpll0Votes)) || (s = wait_us(c, 10)) ||
+         (s = expect(c, Sm8750GpuGcc, GccGpll0Mode, PllLockDet, PllLockDet)) ||
+         (s = expect(c, Sm8750GpuGcc, GccGpll0L, 0xffff, 0x1f)) ||
+         (s = expect(c, Sm8750GpuGcc, GccGpll0Alpha, 0xffff, 0x4000)))
+@@ -344,7 +370,7 @@
+         return s;
+ 
+     trace->step = Sm8750GpuStepOffGpll0;
+-    if ((s = update(c, Sm8750GpuGcc, GccClockVote, Gpll0Votes, 0)) || (s = wait_us(c, 10)))
++    if ((s = gcc_gpll0_vote(c, 0)) || (s = wait_us(c, 10)))
+         return s;
+ 
+     /* D4: gpu_cc_cx_gdsc is VOTABLE: request the collapse and wait 500 us without polling; the GMU
+--- a/Adreno830/Adreno830Start.cpp
++++ b/Adreno830/Adreno830Start.cpp
+@@ -152,6 +152,7 @@
+     bool power_bound;
+ };
+ 
++extern "C" {__attribute__((weak)) volatile uint32_t sm8750_aoss_qmp_owner;}
+ namespace {
+ Adreno830Device g830;
+ /* The cmd-db snapshot: 128 KiB, static storage (never a stack object: XNU kernel stacks are 16 KiB, ARCHITECTURE 4.1.1). */
+@@ -1158,7 +1159,18 @@
+             d->qmp_msgram={reinterpret_cast<void *>(uintptr_t(A830WinAossMsgram)),rpmhRead,rpmhWrite,qmpDelay};
+             d->qmp_ipcc={reinterpret_cast<void *>(uintptr_t(A830WinIpcc)),rpmhRead,rpmhWrite,qmpDelay};
+             Sm8750AossQmpInit(&d->qmp,&d->qmp_msgram,uint32_t(b->aoss_msgram.bytes),&d->qmp_ipcc);
++            /* One message at a time on the channel PaganiAdsp and PaganiWifi share: their lock word, a 3 s wait, then this message anyway. */
++            bool qmpLocked=false;
++            for(unsigned waited=0;waited<3000 && !qmpLocked;++waited) {
++                uint32_t expected=0;
++                qmpLocked=__atomic_compare_exchange_n(&sm8750_aoss_qmp_owner,&expected,uint32_t(Sm8750RpmhLockOwnerGpu),false,__ATOMIC_ACQUIRE,__ATOMIC_RELAXED);
++                if(!qmpLocked)qmpDelay(nullptr,1000);
++            }
+             const int rc=Sm8750AossQmpSendAcdState(&d->qmp,b->knobs.acd?1:0);
++            if(qmpLocked) {
++                uint32_t expected=uint32_t(Sm8750RpmhLockOwnerGpu);
++                __atomic_compare_exchange_n(&sm8750_aoss_qmp_owner,&expected,0u,false,__ATOMIC_RELEASE,__ATOMIC_RELAXED);
++            }
+             s.qmp=uint8_t(Sm8750AossQmpStatusCode(rc));
+             d->acd_ready=b->knobs.acd && rc==Sm8750AossQmpOk;
+         } else s.qmp=A830QmpRefused;

@@ -1,0 +1,58 @@
+--- a/工具/make-a830-layout.sh
++++ b/工具/make-a830-layout.sh
+@@ -28,6 +28,13 @@
+ # A830_OWNER_TRUST=<bundle> replaces build/adreno-metal-plugin/owner-trust.bundle, for the image and as the base of A830_AUDIO's bundle
+ # (a plugin built elsewhere, next2/metal-for-apps: its bundle trusts the old plugin and the new one). A830_EXTRA_ARGS="arg ..." appends
+ # kernel arguments (e.g. pagani-gpu-va=16) to the phone-plus/phone-apps forms.
++# A830_DIAG=<dir> adds the PaganiDiag daemon (UniXNU-Pagani-Drivers drivers/PaganiDiag, scripts/build-paganidiag.py output) to the
++# phone-plus/phone-apps seed (make-phone-seed.py --diag-daemon); the owner trust bundle must carry its CDHash (A830_OWNER_TRUST=
++# <dir>/owner-trust-apps-diag.bundle from scripts/make-diag-trust.py; checked below). The kernel needs phone-diag-sysctl.patch, which
++# starts the daemon in place of DumpPanic when the seed has it (A830_EXTRA_ARGS=pagani-diag=0 keeps it off), and the image gets
++# boot-arg sheng-no-lc=1: launchd spawns that job as a system service (launch type 1), and AMFI's system-service launch policy
++# refuses an owner-trusted binary from the Data volume (zzyc-owner-skip-launch-constraints.patch); A830_EXTRA_ARGS=sheng-no-lc=0
++# overrides it (the last value wins).
+ # Host test: 工具/test-phone-island-layout.py.
+ set -euo pipefail
+ TOP=/Users/xiaochoumao/unixnu-13t
+@@ -49,6 +56,7 @@
+ case "$SEED_NAME" in /*) BASE_SEED=$SEED_NAME ;; *) BASE_SEED=$B/$SEED_NAME ;; esac
+ # A relative A830_OWNER_TRUST means the caller's directory: the payload and boot image steps below run in UniXNU/.
+ case "${A830_OWNER_TRUST:-}" in ''|/*) ;; *) A830_OWNER_TRUST=$PWD/$A830_OWNER_TRUST ;; esac
++case "${A830_DIAG:-}" in ''|/*) ;; *) A830_DIAG=$PWD/$A830_DIAG ;; esac
+ 
+ # The phone variants' seed first, so a failure there leaves board.toml untouched.
+ if [ "$VARIANT" = phone-plus ] || [ "$VARIANT" = phone-apps ]; then
+@@ -74,8 +82,11 @@
+         # The keyboard's preference fixes (make-phone-seed.py --keyboard-prefs); A830_KEYBOARD_PREFS=0 leaves them out.
+         [ "${A830_KEYBOARD_PREFS:-1}" != 0 ] && KEYBOARD+=(--keyboard-prefs)
+     fi
++    DIAG=()
++    [ -n "${A830_DIAG:-}" ] && DIAG=(--diag-daemon "$A830_DIAG")
+     python3 -B "$TOP/工具/make-phone-seed.py" --gib 2 --disable-jobs com.apple.fairplayd.A2,com.apple.routined \
+-        --wallpaper "$TOP/工具/phone-wallpaper-overlay" ${KEYBOARD[@]+"${KEYBOARD[@]}"} ${MIGRATE[@]+"${MIGRATE[@]}"} "$BASE_SEED" "$SEED"
++        --wallpaper "$TOP/工具/phone-wallpaper-overlay" ${KEYBOARD[@]+"${KEYBOARD[@]}"} ${MIGRATE[@]+"${MIGRATE[@]}"} \
++        ${DIAG[@]+"${DIAG[@]}"} "$BASE_SEED" "$SEED"
+     # A830_AUDIO=1: the PaganiAudio audio server plug-in (silent output device until the ADSP path, so the volume HUD and audio
+     # routes exist) added to this seed and its CDHash to a copy of the owner trust bundle (PaganiAudio/scripts/add-pagani-audio-data.py);
+     # the image then takes that bundle and boot-arg pagani-audio=1 (pagani-audio-addon-mount.patch shows it over the HAL directory).
+@@ -223,6 +234,8 @@
+ done
+ [ "$VARIANT" = phone-apps ] && KARGS+=(--kernel-arg sheng-staged-apps=1)
+ [ -n "${AUDIO_TRUST:-}" ] && KARGS+=(--kernel-arg pagani-audio=1)
++# PaganiDiag runs in place of the system service com.apple.DumpPanic: no launch constraints for it (header above).
++[ -n "${A830_DIAG:-}" ] && KARGS+=(--kernel-arg sheng-no-lc=1)
+ for arg in ${A830_EXTRA_ARGS:-}; do KARGS+=(--kernel-arg "$arg"); done
+ 
+ if [ "${LAYOUT_OUT_OF_BOX:-0}" = 1 ]; then
+@@ -263,6 +276,11 @@
+ if cdhash and bytes.fromhex(cdhash) not in open(sys.argv[2], 'rb').read():
+     sys.exit(f'make-a830-layout: the seed\'s Metal plugin {cdhash} is not in {sys.argv[2]} (set A830_OWNER_TRUST)')
+ EOF2
++# The PaganiDiag daemon in the seed runs only with its CDHash in the owner trust bundle.
++if [ -n "${A830_DIAG:-}" ] && { [ "$VARIANT" = phone-plus ] || [ "$VARIANT" = phone-apps ]; }; then
++    python3 -c 'import json, sys; c = json.load(open(sys.argv[1]))["cdhash"]; sys.exit(0 if bytes.fromhex(c) in open(sys.argv[2], "rb").read() else f"make-a830-layout: PaganiDiag {c} is not in {sys.argv[2]} (set A830_OWNER_TRUST)")' \
++        "$A830_DIAG/trust.json" "$OWNER"
++fi
+ ./unixnu payload -D $DEV --out out-gpu --kernel $K --data-ramdisk "$SEED" --owner-trust-cache "$OWNER" "${KARGS[@]}" \
+     > "$LOGS/$NAME-payload.log" 2>&1
+ ./unixnu bootimg -D $DEV --out out-gpu --kernel $K --data-ramdisk "$SEED" --owner-trust-cache "$OWNER" "${KARGS[@]}" \

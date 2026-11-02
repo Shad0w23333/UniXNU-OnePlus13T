@@ -1,0 +1,1655 @@
+--- a/drivers/PaganiArmCpu/ScmiPerf.h
++++ b/drivers/PaganiArmCpu/ScmiPerf.h
+@@ -12,7 +12,11 @@
+ //   Completion is polled (flags 0: no completion interrupt): channel_status free or error with the header's token ours, bounded by a
+ //   timeout. Nothing is read from or written to the RX window (only needed for interrupts).
+ // Every failure (the channel never free, no answer in time, the error bit, a status other than 0, a short or malformed answer, a value
+-// outside what was described) comes back as a Result; the caller switches the feature off for the boot and shows why.
++// outside what was described) comes back as a Result; classify() says which ones are worth another try later (an SCMI BUSY answer; no
++// usable answer: the channel still held, no answer in time, the channel error bit, COMMS_ERROR) and which are final (any other status:
++// the platform refused the message; a malformed answer; no mapping; interrupt context). The caller (CpuFreqGovernor.h) retries the
++// first kind later with a backoff and within a budget, and switches the feature off for the boot on the second, showing why. A transfer
++// never waits longer than the timeout for the channel and the timeout for the answer: retries are the caller's, never in here.
+ #ifndef ARMCPU_SCMI_PERF_H
+ #define ARMCPU_SCMI_PERF_H
+ #include <stdint.h>
+@@ -74,10 +78,37 @@
+ struct Result {
+     Error error;
+     uint8_t protocol, message;
+-    int32_t status;                 // kStatus: the SCMI status (-1 not supported, -2 invalid parameters, -3 denied, ...)
++    int32_t status;                 // kStatus: the SCMI status (Status below)
+ };
+ static inline bool ok(const Result &r) { return r.error == kOk; }
+ 
++// The SCMI status codes (Arm DEN0056, "Status codes"; Linux arm_scmi common.h names them SCMI_ERR_*).
++enum Status : int32_t {
++    kSuccess = 0, kNotSupported = -1, kInvalidParameters = -2, kDenied = -3, kNotFound = -4, kOutOfRange = -5, kBusyStatus = -6,
++    kCommsError = -7, kGenericError = -8, kHardwareError = -9, kProtocolError = -10, kInUse = -11,
++};
++
++// What a failed transfer means for the caller.
++enum Class : uint8_t {
++    kFinal,                         // try no more: a refusal (any status but BUSY and COMMS_ERROR), a malformed answer (short, wrong
++                                    // header, a value outside what was described), no mapping, interrupt context
++    kRetryBusy,                     // the platform answered BUSY (-6): it is there, busy now, and asks to be asked again
++    kRetrySilent,                   // no usable answer: the channel still held from an earlier message (kBusy), no answer in time
++                                    // (kTimeout), the channel error bit (kChannelErr) or COMMS_ERROR (-7), the transport's failures
++};
++static inline Class classify(const Result &r)
++{
++    switch (r.error) {
++    case kStatus:
++        if (r.status == kBusyStatus) return kRetryBusy;
++        return r.status == kCommsError ? kRetrySilent : kFinal;
++    case kBusy: case kTimeout: case kChannelErr: return kRetrySilent;
++    case kOk: case kNotReady: case kInterrupt: case kShort: case kBadHeader: case kBadVersion: case kFewDomains: case kNoLevelSet:
++    case kBadLevels: case kTooManyLevels: case kUnknownLevel: case kBadDomain:
++    default: return kFinal;
++    }
++}
++
+ // "timeout lvl get", "status -3 lvl set", "short describe": what failed and in which message (at most 31 characters).
+ struct Text {
+     char *at;
+--- a/drivers/PaganiArmCpu/CpuFreqGovernor.h
++++ b/drivers/PaganiArmCpu/CpuFreqGovernor.h
+@@ -37,9 +37,25 @@
+ //                     levels). The display coming back ends it in the next window and holds the touch level for kScreenOnBoostMs.
+ //                     Logged once per screen-off period ("cpufreq: screen off ...", "cpufreq: screen on after ..."); without the
+ //                     bit the screen state is not read.
+-// Every failure switches the feature off for the boot with its reason ("CPU scmi off: timeout lvl get"); with the governor the domains
+-// are first asked back to the levels they had at boot (best effort). PERF_LIMITS_GET (only to explain a lowered level) is the one
+-// optional message: a status refusing it stops these queries and counts in "err"; its timeout or malformed answer is a failure too.
++// Failures (Retry below, scmi::classify). Transient ones are retried and never switch the feature off at once: an SCMI BUSY answer (-6;
++// measured 2026-10-31, pkgD2 41.849 s: "status -6 lvl get" in a 5 s check, which used to end the governor for the boot and leave the
++// clusters at their boot levels, about 1997 / 1018 MHz) and no usable answer (a timeout, the channel still held from an earlier message,
++// the channel error bit, COMMS_ERROR -7). After one, the call sends nothing more and no SCMI message goes out for a backoff
++// (kRetryFirstMs: the next governor window, doubled per failure in a row up to kRetryMaxMs); then what is still owed goes out again: a
++// level set that failed is sent again (the domain's level counts as unknown till then), a 5 s check resumes with the domain it stopped
++// at, a failed start probes again (ArmCpu.cpp's thread sleeps till then). Budgets, each like a final failure when it runs out ("status -6
++// lvl set x48", "timeout lvl get x6"): kRetryBudget level sets failed in a row without one going through (about 54 s of BUSY answers),
++// kRetryBudget start attempts in a row, kSilentBudget missing answers in a row without any answer between them (a platform that stopped
++// answering: about 1 s). A 5 s check is informational: after kCheckTries transient failures it is left out, the governor goes on and the
++// next check comes kCheckMs later. Every other failure is final (a refusal, a malformed answer): off for the boot with its reason ("CPU
++// scmi off: short lvl get"); with the governor the domains are first asked back to the levels they had at boot (best effort, once each,
++// also a domain whose level set was left owed). A call never sends more messages than before, so no caller waits longer than before.
++// PERF_LIMITS_GET (only to explain a lowered level) is the one optional message: a status refusing it stops these queries and counts in
++// "err"; BUSY or no answer only leaves that line without the limits (retried like the others, no budget of its own); a malformed answer
++// is final. Log rationing: a line at the start and one at the end of each of the first kRetryLines streaks ("cpufreq: retry: status -6
++// lvl get d1 after lvl set d1, next in 20 ms", "cpufreq: retry ok: lvl get d1 after 1 failure in 20 ms (busy 1, no answer 0)"), then a
++// summary at most every kRetrySummaryMs; the row's "err" counts refusals and retried failures. pagani-cpufreq-retry=0 (Control::noRetry;
++// default 1) makes every failure final again, as before the retries.
+ #ifndef ARMCPU_CPUFREQ_GOVERNOR_H
+ #define ARMCPU_CPUFREQ_GOVERNOR_H
+ #include "ScmiPerf.h"
+@@ -76,6 +92,14 @@
+     // at least the lowest: 748.8 / 1209.6 MHz on the 13T, the 3rd and 2nd levels).
+     kScreenOffDelayMs = 1000, kScreenOffInputMs = 300, kScreenOnBoostMs = 500,
+     kScreenOffKhz0 = 748800, kScreenOffKhz1 = 1209600,
++    // Transient SCMI failures (scmi::classify): no SCMI message for kRetryFirstMs after the 1st in a row (the next governor window), the
++    // backoff doubled per failure in a row up to kRetryMaxMs. Off after kRetryBudget level sets (or start attempts) failed in a row
++    // without one going through (20 + 40 + ... + 640 + 41 x 1280 ms: about 54 s), or kSilentBudget missing answers in a row without
++    // any answer (20 + ... + 320 ms plus six timeouts: about 1 s); a 5 s check is left out after kCheckTries (the governor goes on).
++    // Lines about the first kRetryLines streaks, then a summary at most every kRetrySummaryMs.
++    kRetryFirstMs = 20, kRetryMaxMs = 1280, kRetryBudget = 48, kSilentBudget = 6, kCheckTries = 4, kRetryLines = 8,
++    kRetrySummaryMs = 60000,
++    kNoDomain = 0xff,                   // a failure outside one domain's messages (the start's probe)
+ };
+ 
+ // The screen as the governor reads it each window (pagani-screenoff bit 0): pagani_screen_state (bit 0 the display is off, the count of
+@@ -437,9 +461,40 @@
+     }
+ }
+ 
++// What a failed message was for (controlError): the start (its probe and the boot levels), a level set, the 5 s check's PERF_LEVEL_GET,
++// PERF_LIMITS_GET.
++enum Op : uint8_t { kOpStart, kOpSet, kOpCheck, kOpLimits };
++
++// Transient SCMI failures (scmi::classify: BUSY, no usable answer), what is owed after them and the budgets. All zero after controlStart.
++struct Retry {
++    uint64_t at;                        // no SCMI message before this (counter ticks)
++    uint64_t since;                     // the `now` of the streak's first failure
++    scmi::Result first;                 // the streak's first failure
++    scmi::Result firstSet, firstSilent; // the first of the level sets failed in a row, of the missing answers in a row (the reasons when
++                                        // their budget runs out)
++    scmi::Result last;                  // the latest failure (the row while the start waits)
++    uint32_t streak;                    // transient failures in a row without any message going through (the backoff, the start's budget)
++    uint32_t streakBusy, streakSilent;  // of the streak: BUSY answers, missing answers
++    uint32_t sets;                      // level sets failed in a row without one going through (kRetryBudget)
++    uint32_t silent;                    // missing answers in a row without any answer (kSilentBudget)
++    uint32_t checks;                    // transient failures of the 5 s check under way (at kCheckTries that check is left out)
++    uint32_t pending;                   // bit d: a level set owed to domain d (failed this way, or deferred by the backoff): sent once the
++                                        // backoff passed even when the level asked for is the one recorded (the platform's is unknown)
++    uint32_t checked;                   // bit d: domain d done in the 5 s check under way (a check a failure stopped resumes after it)
++    bool waiting;                       // the start failed this way: controlProbe again at `at`
++    bool logged;                        // the streak's first failure was logged (then its end is too)
++    uint8_t prevMessage, prevDomain;    // the last message that went through and its domain (kNoDomain: none)
++    uint64_t prevAt;                    // the `now` it went through at (a failure in the same window names it)
++    uint32_t busy, missing;             // since boot: BUSY answers, missing answers
++    uint32_t streaks, longest, skipped; // since boot: streaks, the longest one, 5 s checks left out
++    uint32_t lines;                     // lines logged about streaks (their start and a check left out)
++    uint64_t summaryAt;                 // the last summary line (0: none yet)
++};
++
+ struct Control {
+     scmi::Perf perf;
+     Governor gov;
++    Retry retry;
+     uint32_t mode, minMhz;
+     uint32_t level[scmi::kDomains];     // what we asked for (index)
+     uint32_t boot[scmi::kDomains];      // what the platform reported before any change
+@@ -454,6 +509,7 @@
+     uint32_t load[scmi::kDomains];      // percent over the last row period, kLoadUnknown without a running CPU
+     GpuHeat gpu;                        // the GPU's thermal state of the last governor window
+     bool screen;                        // pagani-screenoff bit 0: the governor's screen-off policy (set before controlStart)
++    bool noRetry;                       // pagani-cpufreq-retry=0: every failure final, as before the retries (set before controlStart)
+     void (*log)(void *context, const char *text);
+     void *logContext;
+ };
+@@ -489,22 +545,30 @@
+     scmi::putUnsigned(t, magnitude % 10);
+ }
+ 
+-// Off for the boot: the reason for the row and the log; with the governor the domains are asked back to their boot levels once.
+-static inline void controlFail(Control *c, const scmi::Result &r)
++// Off for the boot: the reason for the row and the log ("status -6 lvl set x48": a budget of transient failures ran out, named after the
++// first of them); with the governor the domains are asked back to their boot levels once, a domain with a level set still owed too (its
++// level is unknown).
++static inline void controlFail(Control *c, const scmi::Result &r, uint32_t times = 0)
+ {
+     c->on = false;
+-    scmi::describe(r, c->reason, sizeof(c->reason));
++    c->retry.waiting = false;
++    char why[40];
++    scmi::describe(r, why, sizeof(why));
++    scmi::Text reason = {c->reason, 0, sizeof(c->reason)};
++    scmi::put(&reason, why);
++    if (times > 1) { scmi::put(&reason, " x"); scmi::putUnsigned(&reason, times); }
+     char line[120];
+     scmi::Text t = {line, 0, sizeof(line)};
+     scmi::put(&t, "cpufreq: off: ");
+     scmi::put(&t, c->reason);
+     note(c, line);
+-    if (c->mode != kModeGovernor || !c->changed) return;
++    const uint32_t owed = c->retry.pending;
++    c->retry.pending = 0;
++    if (c->mode != kModeGovernor || (!c->changed && !owed)) return;
+     c->changed = false;
+     for (unsigned d = 0; d < scmi::kDomains; d++) {
+-        if (c->level[d] == c->boot[d]) continue;
++        if (c->level[d] == c->boot[d] && !(owed & (1u << d))) continue;
+         const scmi::Result back = scmi::levelSet(&c->perf, d, c->boot[d]);
+-        char why[40];
+         scmi::describe(back, why, sizeof(why));
+         t.used = 0;
+         scmi::put(&t, "cpufreq: d");
+@@ -515,13 +579,182 @@
+         scmi::put(&t, why);
+         note(c, line);
+         if (scmi::ok(back)) c->level[d] = c->boot[d];
++    }
++}
++
++// No SCMI message while a transient failure's backoff lasts.
++static inline bool controlReady(const Control *c, uint64_t now) { return now >= c->retry.at; }
++
++// The backoff after the n-th transient failure in a row: kRetryFirstMs doubled n - 1 times, at most kRetryMaxMs.
++static inline uint32_t retryMs(uint32_t n)
++{
++    uint32_t ms = kRetryFirstMs;
++    for (uint32_t i = 1; i < n && ms < kRetryMaxMs; i++) ms *= 2;
++    return ms < kRetryMaxMs ? ms : kRetryMaxMs;
++}
++
++// " d1" for a domain, nothing for kNoDomain.
++static inline void putDomain(scmi::Text *t, unsigned d)
++{
++    if (d >= scmi::kDomains) return;
++    scmi::put(t, " d");
++    scmi::putUnsigned(t, d);
++}
++
++// Counter ticks as whole milliseconds.
++static inline void putMs(scmi::Text *t, uint64_t span, uint64_t hz)
++{
++    const uint64_t perMs = hz / 1000;
++    scmi::putUnsigned(t, perMs ? span / perMs : 0);
++}
++
++// "start", "lvl set d1", "lvl get d0", "lim get d1": what a message was for.
++static inline void putOp(scmi::Text *t, Op op, unsigned d)
++{
++    if (op == kOpStart) { scmi::put(t, "start"); return; }
++    scmi::put(t, scmi::messageName(scmi::kPerf, op == kOpSet ? scmi::kLevelSet : op == kOpCheck ? scmi::kLevelGet : scmi::kLimitsGet));
++    putDomain(t, d);
++}
++
++// A message for `op` (domain d or kNoDomain) went through: whatever was missing answered, a level set run ends, a streak under way ends
++// (its end logged when its start was: "cpufreq: retry ok: lvl get d1 after 1 failure in 20 ms (busy 1, no answer 0)").
++static inline void retryOk(Control *c, uint64_t now, Op op, unsigned d)
++{
++    Retry *y = &c->retry;
++    y->silent = 0;
++    if (op == kOpSet) y->sets = 0;
++    y->prevMessage = (uint8_t)(op == kOpSet ? scmi::kLevelSet : op == kOpCheck ? scmi::kLevelGet : op == kOpLimits ? scmi::kLimitsGet : 0);
++    y->prevDomain = (uint8_t)(op != kOpStart && d < scmi::kDomains ? d : kNoDomain);
++    y->prevAt = now;
++    if (!y->streak) return;
++    if (y->logged) {
++        char line[120];
++        scmi::Text t = {line, 0, sizeof(line)};
++        scmi::put(&t, "cpufreq: retry ok: ");
++        putOp(&t, op, d);
++        scmi::put(&t, " after ");
++        scmi::putUnsigned(&t, y->streak);
++        scmi::put(&t, y->streak == 1 ? " failure in " : " failures in ");
++        putMs(&t, now - y->since, c->perf.channel.io.hz);
++        scmi::put(&t, " ms (busy ");
++        scmi::putUnsigned(&t, y->streakBusy);
++        scmi::put(&t, ", no answer ");
++        scmi::putUnsigned(&t, y->streakSilent);
++        scmi::put(&t, ")");
++        note(c, line);
++    }
++    y->streak = 0; y->streakBusy = 0; y->streakSilent = 0; y->logged = false;
++}
++
++// A message for `op` failed (r; domain d or kNoDomain). False when the feature went off: a final failure, or a budget ran out
++// (kSilentBudget missing answers in a row without any answer; kRetryBudget level sets failed in a row without one going through, or
++// start attempts in a row). True when it is to be tried again: no SCMI message before the backoff passed, kRetryFirstMs doubled per
++// failure in a row (the streak's, or this kind of message's when more) up to kRetryMaxMs; a 5 s check is left out after kCheckTries (the
++// next one kCheckMs later; the governor goes on). Lines about the first kRetryLines streaks, then a summary at most every
++// kRetrySummaryMs.
++static inline bool controlError(Control *c, const scmi::Result &r, uint64_t now, unsigned d, Op op)
++{
++    const scmi::Class kind = scmi::classify(r);
++    if (kind == scmi::kFinal || c->noRetry) { controlFail(c, r); return false; }
++    Retry *y = &c->retry;
++    if (!y->streak) { y->first = r; y->since = now; y->streaks++; y->logged = false; }
++    y->streak++;
++    if (y->streak > y->longest) y->longest = y->streak;
++    y->last = r;
++    if (kind == scmi::kRetryBusy) {
++        y->busy++; y->streakBusy++;
++        y->silent = 0;                  // an answer: the platform is there
++    } else {
++        if (!y->silent) y->firstSilent = r;
++        y->silent++; y->missing++; y->streakSilent++;
++    }
++    uint32_t run = y->streak;
++    if (op == kOpSet) {
++        if (!y->sets) y->firstSet = r;
++        y->sets++;
++        if (y->sets > run) run = y->sets;
++    } else if (op == kOpCheck) {
++        y->checks++;
++        if (y->checks > run) run = y->checks;
++    }
++    if (y->silent >= kSilentBudget) { controlFail(c, y->firstSilent, y->silent); return false; }
++    if (op == kOpSet && y->sets >= kRetryBudget) { controlFail(c, y->firstSet, y->sets); return false; }
++    if (op == kOpStart && y->streak >= kRetryBudget) { controlFail(c, y->first, y->streak); return false; }
++    const uint64_t hz = c->perf.channel.io.hz;
++    const uint32_t ms = retryMs(run);
++    y->at = now + ticks(hz, ms);
++    char line[160], why[40];
++    scmi::Text t = {line, 0, sizeof(line)};
++    if (op == kOpCheck && y->checks >= kCheckTries) {
++        // "cpufreq: 5 s check left out after 4 failed tries (last: status -6 lvl get d0), the next in 5 s"
++        y->skipped++;
++        y->checks = 0; y->checked = 0;
++        c->lastCheck = now;
++        if (y->lines < kRetryLines) {
++            y->lines++;
++            scmi::describe(r, why, sizeof(why));
++            scmi::put(&t, "cpufreq: 5 s check left out after ");
++            scmi::putUnsigned(&t, kCheckTries);
++            scmi::put(&t, " failed tries (last: ");
++            scmi::put(&t, why);
++            putDomain(&t, d);
++            scmi::put(&t, "), the next in ");
++            scmi::putUnsigned(&t, kCheckMs / 1000);
++            scmi::put(&t, " s");
++            note(c, line);
++            t.used = 0;
++        }
+     }
++    if (y->streak != 1) return true;
++    if (y->lines < kRetryLines) {
++        // "cpufreq: retry: status -6 lvl get d1 after lvl set d1, next in 20 ms"
++        y->lines++;
++        y->logged = true;
++        scmi::describe(r, why, sizeof(why));
++        scmi::put(&t, "cpufreq: retry: ");
++        scmi::put(&t, why);
++        putDomain(&t, d);
++        if (y->prevAt == now && y->prevDomain < scmi::kDomains) {
++            scmi::put(&t, " after ");
++            scmi::put(&t, scmi::messageName(scmi::kPerf, y->prevMessage));
++            putDomain(&t, y->prevDomain);
++        }
++        scmi::put(&t, ", next in ");
++        scmi::putUnsigned(&t, ms);
++        scmi::put(&t, " ms");
++        note(c, line);
++    } else if (!y->summaryAt || now - y->summaryAt >= ticks(hz, kRetrySummaryMs)) {
++        // "cpufreq: retries since boot: busy 57, no answer 2, 30 streaks, longest 5, checks left out 1 (a line a minute at most)"
++        y->summaryAt = now ? now : 1;
++        scmi::put(&t, "cpufreq: retries since boot: busy ");
++        scmi::putUnsigned(&t, y->busy);
++        scmi::put(&t, ", no answer ");
++        scmi::putUnsigned(&t, y->missing);
++        scmi::put(&t, ", ");
++        scmi::putUnsigned(&t, y->streaks);
++        scmi::put(&t, " streaks, longest ");
++        scmi::putUnsigned(&t, y->longest);
++        scmi::put(&t, ", checks left out ");
++        scmi::putUnsigned(&t, y->skipped);
++        scmi::put(&t, " (a line a minute at most)");
++        note(c, line);
++    }
++    return true;
+ }
+ 
++// Asks for level `level` of domain d. True while the feature stays on: also when a transient failure leaves the level set owed (sent again
++// once the backoff passed) or the backoff defers it; false when it went off.
+ static inline bool setLevel(Control *c, unsigned d, uint32_t level, uint64_t now)
+ {
++    if (!c->on) return false;
++    if (!controlReady(c, now)) { c->retry.pending |= 1u << d; return true; }
+     const scmi::Result r = scmi::levelSet(&c->perf, d, level);
+-    if (!scmi::ok(r)) { controlFail(c, r); return false; }
++    if (!scmi::ok(r)) {
++        c->retry.pending |= 1u << d;
++        return controlError(c, r, now, d, kOpSet);
++    }
++    retryOk(c, now, kOpSet, d);
++    c->retry.pending &= ~(1u << d);
+     if (c->mode == kModeGovernor) governorSet(&c->gov, d, level, now);
+     c->level[d] = level;
+     c->changed = true;
+@@ -529,16 +762,22 @@
+ }
+ 
+ // PERF_LEVEL_GET of both domains: a domain below what we asked for is counted and logged when that changes (with PERF_LIMITS_GET while it
+-// answers); pagani-cpufreq=1 asks for the top level again whenever the answer differs from it.
++// answers); pagani-cpufreq=1 asks for the top level again whenever the answer differs from it. A transient failure stops the check where
++// it is: it resumes with that domain once the backoff passed (the domains done are not asked or counted again) and counts as done
++// (lastCheck) once both domains are; after kCheckTries such failures it is left out (controlError).
+ static inline bool controlCheck(Control *c, uint64_t now)
+ {
+     if (!c->on) return false;
+-    c->lastCheck = now;
++    if (!controlReady(c, now)) return true;
+     for (unsigned d = 0; d < scmi::kDomains; d++) {
++        if (c->retry.checked & (1u << d)) continue;
+         uint32_t index = 0, raw = 0;
+         const scmi::Result r = scmi::levelGet(&c->perf, d, &index, &raw);
+-        if (!scmi::ok(r)) { controlFail(c, r); return false; }
++        if (!scmi::ok(r)) return controlError(c, r, now, d, kOpCheck);
++        retryOk(c, now, kOpCheck, d);
++        c->retry.checked |= 1u << d;
+         const scmi::Domain &dom = c->perf.domain[d];
++        scmi::Result later = scmi::fail(scmi::kOk, scmi::kPerf, scmi::kLimitsGet);    // PERF_LIMITS_GET failed transiently
+         if (index < c->level[d]) {
+             c->lowered++;
+             if (c->seen[d] != index) {
+@@ -551,11 +790,17 @@
+                 if (c->limits) {
+                     uint32_t hi = 0, lo = 0;
+                     const scmi::Result limits = scmi::limitsGet(&c->perf, d, &hi, &lo);
++                    const scmi::Class kind = scmi::classify(limits);
+                     if (scmi::ok(limits)) {
++                        retryOk(c, now, kOpLimits, d);
+                         scmi::put(&t, ", limits lv"); scmi::putUnsigned(&t, lo); scmi::put(&t, "-"); scmi::putUnsigned(&t, hi);
++                    } else if (kind != scmi::kFinal) {
++                        later = limits;                 // BUSY or no answer: this line without the limits, asked again next time
++                        scmi::put(&t, kind == scmi::kRetryBusy ? ", limits busy" : ", limits no answer");
+                     } else if (limits.error == scmi::kStatus) {
+                         c->limits = false;              // refused: optional, not asked again
+                         c->errors++;
++                        c->retry.silent = 0;            // an answer
+                         scmi::put(&t, ", limits status "); scmi::putSigned(&t, limits.status);
+                     } else {
+                         controlFail(c, limits);
+@@ -573,13 +818,37 @@
+         }
+         c->below[d] = index < c->level[d];
+         c->seen[d] = index;
+-        if (c->mode == kModeMax && index != dom.count - 1 && !setLevel(c, d, dom.count - 1, now)) return false;
++        const bool top = c->mode == kModeMax && index != dom.count - 1;     // pagani-cpufreq=1: the top again
++        if (!scmi::ok(later)) {
++            if (top) c->retry.pending |= 1u << d;       // after the backoff (controlWindowCpus)
++            return controlError(c, later, now, d, kOpLimits);
++        }
++        if (top) {
++            if (!setLevel(c, d, dom.count - 1, now)) return false;
++            if (!controlReady(c, now)) return true;     // the set failed transiently: the other domain after the backoff
++        }
+     }
++    c->retry.checked = 0;
++    c->retry.checks = 0;
++    c->lastCheck = now;
+     return true;
+ }
+ 
+-// After the probe: the levels the platform has now, then pagani-cpufreq=1 the top level of both domains (checked at once), or
+-// pagani-cpufreq=2 the governor from where the levels are. False (off, with the reason) on any failure.
++static inline void retryInit(Retry *y)
++{
++    y->at = 0; y->since = 0;
++    y->first = y->firstSet = y->firstSilent = y->last = scmi::fail(scmi::kOk, 0, 0);
++    y->streak = 0; y->streakBusy = 0; y->streakSilent = 0; y->sets = 0; y->silent = 0; y->checks = 0;
++    y->pending = 0; y->checked = 0;
++    y->waiting = false; y->logged = false;
++    y->prevMessage = 0; y->prevDomain = kNoDomain; y->prevAt = 0;
++    y->busy = 0; y->missing = 0; y->streaks = 0; y->longest = 0; y->skipped = 0; y->lines = 0; y->summaryAt = 0;
++}
++
++static inline bool controlProbe(Control *c, uint64_t now);
++
++// The start: everything reset, then controlProbe. False when off (with the reason), or with c->retry.waiting when a transient failure
++// (BUSY, no answer) leaves the start to be tried again: the caller calls controlProbe once c->retry.at has passed (within the budgets).
+ static inline bool controlStart(Control *c, uint32_t mode, uint32_t minMhz, uint64_t now)
+ {
+     c->mode = mode; c->minMhz = minMhz;
+@@ -589,16 +858,38 @@
+     for (unsigned d = 0; d < scmi::kDomains; d++) {
+         c->loadBusy[d] = 0; c->loadSpan[d] = 0; c->load[d] = kLoadUnknown;
+     }
++    retryInit(&c->retry);
++    return controlProbe(c, now);
++}
++
++// One attempt at the start: the probe, the levels the platform has now, then pagani-cpufreq=1 the top level of both domains (checked at
++// once), or pagani-cpufreq=2 the governor from where the levels are. False when off, or (c->retry.waiting) to be tried again; an attempt
++// sends what one start sends.
++static inline bool controlProbe(Control *c, uint64_t now)
++{
++    if (c->on || c->reason[0]) { c->retry.waiting = false; return c->on; }     // started already, or off for the boot
++    if (!controlReady(c, now)) { c->retry.waiting = true; return false; }      // too early: still waiting, nothing sent
++    c->retry.waiting = false;
++    const uint64_t sent = c->perf.channel.transfers;
+     scmi::Result r = scmi::probe(&c->perf);
++    unsigned failed = kNoDomain;
+     for (unsigned d = 0; scmi::ok(r) && d < scmi::kDomains; d++) {
+         uint32_t raw = 0;
+         r = scmi::levelGet(&c->perf, d, &c->boot[d], &raw);
++        if (!scmi::ok(r)) failed = d;
+         c->level[d] = c->boot[d];
+         c->seen[d] = c->boot[d];
+         c->below[d] = false;
+     }
+-    if (!scmi::ok(r)) { controlFail(c, r); return false; }
++    if (!scmi::ok(r)) {
++        // The messages of this attempt before the one that failed were answered: the platform is there.
++        if (c->perf.channel.transfers - sent > 1) c->retry.silent = 0;
++        if (controlError(c, r, now, failed, kOpStart)) c->retry.waiting = true;
++        return false;
++    }
++    retryOk(c, now, kOpStart, kNoDomain);
+     c->on = true;
++    c->lastCheck = now;
+     char line[200];
+     scmi::Text t = {line, 0, sizeof(line)};
+     scmi::put(&t, "cpufreq: scmi base ");
+@@ -614,14 +905,15 @@
+         putMhz(&t, dom.levels[dom.count - 1].khz); scmi::put(&t, "MHz at lv"); scmi::putUnsigned(&t, c->boot[d]);
+         if (dom.rateLimitUs) { scmi::put(&t, " rl "); scmi::putUnsigned(&t, dom.rateLimitUs); scmi::put(&t, "us"); }
+     }
+-    scmi::put(&t, ", mode "); scmi::putUnsigned(&t, mode);
++    scmi::put(&t, ", mode "); scmi::putUnsigned(&t, c->mode);
++    if (c->noRetry) scmi::put(&t, ", no retries");
+     note(c, line);
+-    if (mode == kModeMax) {
++    if (c->mode == kModeMax) {
+         for (unsigned d = 0; d < scmi::kDomains; d++)
+             if (!setLevel(c, d, c->perf.domain[d].count - 1, now)) return false;
+         return controlCheck(c, now);
+     }
+-    governorInit(&c->gov, c->perf, minMhz, c->level, c->perf.channel.io.hz, now);
++    governorInit(&c->gov, c->perf, c->minMhz, c->level, c->perf.channel.io.hz, now);
+     // "cpufreq: governor floor 960/1689 MHz, touch 2227/2841 MHz for 100 ms, GPU frames 1785/2649 MHz, heat caps 2745/3072 MHz"
+     t.used = 0;
+     scmi::put(&t, "cpufreq: governor floor ");
+@@ -729,9 +1021,11 @@
+     note(c, line);
+ }
+ 
+-// One governor window (pagani-cpufreq=2); every kCheckMs also the check. cpus[n]: cpuWindows over the window (the row's load takes the
+-// busiest CPU per domain, as domainBusy); heat: what adreno830_thermal_state() returned (pagani-cpufreq=1 ignores it); screen: the screen
+-// state and key reports (read only with pagani-screenoff bit 0, Control::screen).
++// One window: pagani-cpufreq=2 a governor window, pagani-cpufreq=1 (windows of kRowMs) a top level still owed after a transient
++// failure; both every kCheckMs the check. cpus[n]: cpuWindows over the window (the row's load takes the busiest CPU per domain, as
++// domainBusy); heat: what adreno830_thermal_state() returned (pagani-cpufreq=1 ignores it); screen: the screen state and key reports (read
++// only with pagani-screenoff bit 0, Control::screen). No SCMI message while a transient failure's backoff lasts; a level set still owed
++// goes out again once it passed, even when the level is the one recorded. False once the feature is off.
+ static inline bool controlWindowCpus(Control *c, uint64_t now, const CpuWindow *cpus, unsigned n, uint32_t touch, uint32_t gpu,
+                                      GpuHeat heat = GpuHeat{0, 0}, ScreenInput screen = ScreenInput{0, 0})
+ {
+@@ -746,17 +1040,23 @@
+         }
+         c->loadBusy[d] += busy; c->loadSpan[d] += span;
+     }
+-    if (c->mode != kModeGovernor) return true;
++    const uint64_t checkTicks = ticks(c->perf.channel.io.hz, kCheckMs);
++    if (c->mode != kModeGovernor) {
++        for (unsigned d = 0; d < scmi::kDomains && controlReady(c, now); d++)
++            if ((c->retry.pending & (1u << d)) && !setLevel(c, d, c->perf.domain[d].count - 1, now)) return false;
++        if (controlReady(c, now) && now - c->lastCheck >= checkTicks) return controlCheck(c, now);
++        return true;
++    }
+     const GpuHeat before = c->gpu;
+     c->gpu = heat;
+     uint32_t target[scmi::kDomains];
+     const bool wasOff = c->gov.screenOff;
+     governorStep(&c->gov, now, cpus, n, touch, gpu, heat.flags, target, screen);
+     noteHeat(c, before, heat);
+-    for (unsigned d = 0; d < scmi::kDomains; d++)
+-        if (target[d] != c->level[d] && !setLevel(c, d, target[d], now)) return false;
++    for (unsigned d = 0; d < scmi::kDomains && controlReady(c, now); d++)
++        if ((target[d] != c->level[d] || (c->retry.pending & (1u << d))) && !setLevel(c, d, target[d], now)) return false;
+     if (c->gov.screenPolicy) noteScreen(c, now, wasOff);
+-    if (now - c->lastCheck >= ticks(c->perf.channel.io.hz, kCheckMs)) return controlCheck(c, now);
++    if (controlReady(c, now) && now - c->lastCheck >= checkTicks) return controlCheck(c, now);
+     return true;
+ }
+ 
+@@ -787,14 +1087,23 @@
+ //                                                                 times the GPU began to be limited by heat (left out when the row has
+ //                                                                 no room for it)
+ //   "CPU max 3532/4320MHz lv15/15 ld 34/12% thr 0 err 0"         pagani-cpufreq=1
+-//   "CPU scmi off: timeout lvl get"                              off, with the reason
++//   "CPU scmi off: timeout lvl get x6"                           off, with the reason
++//   "CPU scmi retry: status -6 base ver"                         the start waits for its next try after a transient failure
+ // A domain the last check found below what we asked for shows that level with '!' ("lv13!/15") while we still ask for more than it;
+-// a level the governor raised since that check is no lowering (no '!').
++// a level the governor raised since that check is no lowering (no '!'). "err": refused optional messages plus the transient failures
++// retried (BUSY answers, missing answers).
+ static inline void controlRow(const Control *c, char *out, size_t size)
+ {
+     scmi::Text t = {out, 0, size < kRowWidth + 1 ? size : kRowWidth + 1};
+     if (size) out[0] = 0;
+     if (!c->on) {
++        if (c->retry.waiting) {
++            char why[40];
++            scmi::describe(c->retry.last, why, sizeof(why));
++            scmi::put(&t, "CPU scmi retry: ");
++            scmi::put(&t, why);
++            return;
++        }
+         scmi::put(&t, "CPU scmi off: ");
+         scmi::put(&t, c->reason[0] ? c->reason : "?");
+         return;
+@@ -825,7 +1134,8 @@
+     scmi::put(&t, "%");
+     if (c->mode == kModeGovernor) { scmi::put(&t, " boost "); scmi::putUnsigned(&t, clip(c->gov.boosts, 999)); }
+     scmi::put(&t, " thr "); scmi::putUnsigned(&t, clip(c->lowered, 999));
+-    scmi::put(&t, " err "); scmi::putUnsigned(&t, clip(c->errors, 999));
++    const uint64_t errors = (uint64_t)c->errors + c->retry.busy + c->retry.missing;
++    scmi::put(&t, " err "); scmi::putUnsigned(&t, errors > 999 ? 999 : errors);
+     if (c->mode == kModeGovernor) {
+         char hot[16];
+         scmi::Text h = {hot, 0, sizeof(hot)};
+--- a/drivers/PaganiArmCpu/ArmCpu.cpp
++++ b/drivers/PaganiArmCpu/ArmCpu.cpp
+@@ -213,8 +213,10 @@
+ // travel). Absent or 0: nothing here runs, no window is mapped. Otherwise one kernel thread does everything: it maps the CPUCP mailbox
+ // windows and the SCMI shared memory, describes both performance domains, then holds the top level (1) or runs the governor (2), and
+ // shows the CPU row (BootProgress row 14). All SCMI use holds gCpuFreqLock and happens in that thread; a caller in interrupt context
+-// is refused before any access. A failure switches the feature off for the boot and says why on the row; it never panics.
+-// armcpu_cpufreq_state: 0 not started, 1 probing, 2 running, 3 off after a failure.
++// is refused before any access. A transient SCMI failure (BUSY, no answer) is retried after a backoff (CpuFreqGovernor.h, Retry; a start
++// that failed this way probes again after it, the thread sleeping meanwhile); a final failure, or a retry budget run out, switches the
++// feature off for the boot and says why on the row; it never panics.
++// armcpu_cpufreq_state: 0 not started, 1 probing (also while a start waits for its retry), 2 running, 3 off after a failure.
+ extern "C" {
+ volatile uint32_t armcpu_cpufreq_state = 0;
+ }
+@@ -225,6 +227,7 @@
+ uintptr_t gCpuFreqTxVa, gCpuFreqShmemVa;
+ uint32_t gCpuFreqMode, gCpuFreqMin;
+ bool gCpuFreqScreen;                        // pagani-screenoff bit 0: the governor's screen-off policy (CpuFreqGovernor.h)
++bool gCpuFreqNoRetry;                       // pagani-cpufreq-retry=0: every SCMI failure final (CpuFreqGovernor.h, Retry)
+ uint64_t gCpuFreqSpin;                      // counter ticks a poll spins before it sleeps between reads
+ char gCpuFreqShown[cpufreq::kRowWidth + 1];
+ // The performance domain of each logical CPU from its DT affinity (MPIDR Aff2: CPUs 0x0-0x500 domain 0, 0x10000 and 0x10100 domain 1),
+@@ -304,6 +307,16 @@
+   cpufreqLog (nullptr, line);
+   armcpu_cpufreq_state = 3;
+   cpufreqPublish ();
++}
++
++// Sleeps until counter tick `at` (a retry's backoff; at least 1 ms, at most 2 s: the backoff is at most cpufreq::kRetryMaxMs).
++void cpufreqSleepUntil (uint64_t at, uint64_t hz)
++{
++  const uint64_t now = cpufreqNow (nullptr), perMs = hz / 1000 != 0 ? hz / 1000 : 1;
++  uint64_t ms = at > now ? (at - now + perMs - 1) / perMs : 1;
++  if (ms == 0) { ms = 1; }
++  if (ms > 2000) { ms = 2000; }
++  IOSleep (static_cast<unsigned> (ms));
+ }
+ 
+ // Device memory (uncached) for one register window; the map keeps its descriptor.
+@@ -358,8 +371,10 @@
+   gCpuFreqRx = cpufreqMap (scmi::kRxBase, scmi::kRxBytes);
+   gCpuFreqShmem = cpufreqMap (scmi::kShmemBase, scmi::kShmemBytes);
+   if (gCpuFreqTx == nullptr) { cpufreqOff ("map tx"); return; }
+-  if (gCpuFreqRx == nullptr) { cpufreqOff ("map rx"); return; }
+   if (gCpuFreqShmem == nullptr) { cpufreqOff ("map shmem"); return; }
++  // The RX window is only for the CPUCP's completion interrupts, which a polled transfer never asks for: nothing reads or writes it, so
++  // a failure to map it is only noted.
++  if (gCpuFreqRx == nullptr) { cpufreqLog (nullptr, "cpufreq: rx window not mapped (not used: completion is polled)"); }
+   gCpuFreqTxVa = static_cast<uintptr_t> (gCpuFreqTx->getVirtualAddress ());
+   gCpuFreqShmemVa = static_cast<uintptr_t> (gCpuFreqShmem->getVirtualAddress ());
+   scmi::Io io = {};
+@@ -378,8 +393,18 @@
+   cpufreqLog (nullptr, "cpufreq: probing CPUCP SCMI (tx 0x17830000 doorbell 0x104, shmem 0x17b4e000)");
+   IOLockLock (gCpuFreqLock);
+   c->screen = gCpuFreqScreen && gCpuFreqMode == cpufreq::kModeGovernor;
++  c->noRetry = gCpuFreqNoRetry;
+   bool alive = cpufreq::controlStart (c, gCpuFreqMode, gCpuFreqMin, cpufreqNow (nullptr));
+   IOLockUnlock (gCpuFreqLock);
++  // A start that failed transiently (BUSY, no answer: c->retry.waiting) probes again once its backoff passed, the thread asleep meanwhile;
++  // the retry budgets end it ("CPU scmi off: ... x6"). Each attempt sends what one start sends.
++  while (!alive && c->retry.waiting) {
++    cpufreqPublish ();
++    cpufreqSleepUntil (c->retry.at, hz);
++    IOLockLock (gCpuFreqLock);
++    alive = cpufreq::controlProbe (c, cpufreqNow (nullptr));
++    IOLockUnlock (gCpuFreqLock);
++  }
+   cpufreqPublish ();
+   {
+     char text[cpufreq::kRowWidth + 1];
+@@ -417,10 +442,8 @@
+       screen.keys = __atomic_load_n (&pagani_input_key_events, __ATOMIC_RELAXED);
+     }
+     IOLockLock (gCpuFreqLock);
++    // Both modes: the governor window (2) or a top level still owed (1), and the 5 s check; nothing while a retry's backoff lasts.
+     alive = cpufreq::controlWindowCpus (c, at, cpus, cpufreq::kCpus, touches, hint, heat, screen);
+-    if (alive && gCpuFreqMode == cpufreq::kModeMax && at - c->lastCheck >= cpufreq::ticks (hz, cpufreq::kCheckMs)) {
+-      alive = cpufreq::controlCheck (c, at);
+-    }
+     IOLockUnlock (gCpuFreqLock);
+     if (!alive) { armcpu_cpufreq_state = 3; cpufreqPublish (); return; }
+     if (at - rowAt >= cpufreq::ticks (hz, cpufreq::kRowMs)) {
+@@ -441,13 +464,16 @@
+ 
+ // From the boot CPU's start: pagani-cpufreq=1 or 2 starts the thread; absent or 0 does nothing; another value only says so on the row.
+ // pagani-screenoff bit 0 adds the governor's screen-off policy (pagani-cpufreq=2 only; the other bits are the GPU's and the panel's).
++// pagani-cpufreq-retry=0 makes every SCMI failure final again (default 1: BUSY and missing answers are retried, CpuFreqGovernor.h).
+ void cpufreqStart (void)
+ {
+-  unsigned mode = 0, mhz = 0, screen = 0;
++  unsigned mode = 0, mhz = 0, screen = 0, retry = 1;
+   if (!PE_parse_boot_argn ("pagani-cpufreq", &mode, sizeof (mode)) || mode == cpufreq::kModeOff) { return; }
+   PE_parse_boot_argn ("pagani-cpufreq-min", &mhz, sizeof (mhz));
+   PE_parse_boot_argn ("pagani-screenoff", &screen, sizeof (screen));
++  PE_parse_boot_argn ("pagani-cpufreq-retry", &retry, sizeof (retry));
+   gCpuFreqScreen = (screen & 1u) != 0;
++  gCpuFreqNoRetry = retry == 0;
+   gCpuFreq.mode = mode;
+   if (mode != cpufreq::kModeMax && mode != cpufreq::kModeGovernor) { cpufreqOff ("bad pagani-cpufreq"); return; }
+   gCpuFreqMode = mode;
+--- a/drivers/PaganiArmCpu/README.md
++++ b/drivers/PaganiArmCpu/README.md
+@@ -61,20 +61,43 @@
+   `CPU 3532/4320MHz lv15/15 ld 34/12% boost 3 thr 0 err 0 hot 1` (mode 2), `CPU max 3532/4320MHz lv15/15 ld 2/0% thr 0 err 0`
+   (mode 1): MHz and level index per domain (a level the last check found lowered by the firmware with `!`, while the request is
+   still above it; a level the governor raised since that check is no lowering), the busiest CPU's load per domain over the
+-  last second, touch boosts, lowered checks, refused PERF_LIMITS_GET and (mode 2, when it fits) how often the GPU began to be
+-  limited by heat. Off: `CPU scmi off: timeout lvl get` (what failed and in which message). Events go to the ramoops log
+-  (`U` records, `cpufreq: ...`).
+-- Every failure (the channel never free, no answer within 30 ms, the error bit, an SCMI status, a short or malformed answer)
+-  switches the feature off for the boot and shows why; with the governor both domains are first asked back to their boot
+-  levels; none of these panics. The one thing software cannot catch: a window the hypervisor (Gunyah) does not map for the
+-  VM faults on its first access (logged just before it: `cpufreq: probing CPUCP SCMI ...`). `armcpu_cpufreq_state`: 0 not
+-  started, 1 probing, 2 running, 3 off.
++  last second, touch boosts, lowered checks, `err` (refused PERF_LIMITS_GET plus the transient SCMI failures that were retried)
++  and (mode 2, when it fits) how often the GPU began to be limited by heat. Off: `CPU scmi off: timeout lvl get x6` (what
++  failed, in which message, and how many times in a row when a retry budget ran out); while a start waits for its retry:
++  `CPU scmi retry: status -6 base ver`. Events go to the ramoops log (`U` records, `cpufreq: ...`).
++- Transient SCMI failures are retried, never a reason to stop at once (measured 2026-10-31, pkgD2 at 41.849 s: a single
++  `status -6 lvl get`, SCMI BUSY, in a 5 s check switched the governor off for the boot and left the clusters at their boot
++  levels, about 1997 / 1018 MHz). Transient: a BUSY answer (-6), and no usable answer (no answer within 30 ms, the channel
++  still held from an earlier message, the channel error bit, COMMS_ERROR -7). After one, that call sends nothing more and no
++  SCMI message goes out for a backoff: 20 ms (the next governor window), doubled per failure in a row up to 1280 ms; then
++  what is still owed goes out again: a level set that failed is sent again (the domain's level counts as unknown until then,
++  so it is sent even when the governor's level did not change), a 5 s check resumes with the domain it stopped at (the other
++  is neither asked nor counted again), a start that failed probes again (the thread sleeps meanwhile; the row says `CPU scmi
++  retry: ...`). No call sends more messages than before, so nothing waits longer than before. Budgets, each ending the feature
++  like a final failure: 48 level sets failed in a row without one going through (about 54 s of BUSY), 48 start attempts in a
++  row, or 6 missing answers in a row without any answer between them (a CPUCP that stopped answering: about 1 s). A 5 s check
++  is informational: after 4 failed tries it is left out (the governor goes on, the next check 5 s later). PERF_LIMITS_GET
++  BUSY or unanswered only leaves that lowering's line without the limits (`, limits busy`); a status refusing it stops these
++  queries (counted in `err`). Logged with rationing: a line at the start and one at the end of each of the first 8 streaks
++  (`cpufreq: retry: status -6 lvl get d1 after lvl set d1, next in 20 ms`, `cpufreq: retry ok: lvl get d1 after 1 failure in
++  20 ms (busy 1, no answer 0)`), a line when a check is left out, then a summary at most once a minute (`cpufreq: retries
++  since boot: busy 57, no answer 2, 30 streaks, longest 5, checks left out 1 ...`). `pagani-cpufreq-retry=0` (default 1)
++  makes every failure final again, as before (the start line then ends with `, no retries`).
++- Every other failure is final (any other SCMI status, a short or malformed answer, a value outside what was described): the
++  feature goes off for the boot and shows why; with the governor both domains are first asked back to their boot levels (once
++  each, also a domain whose level set was left owed); none of these panics. The RX mailbox window is mapped but never touched
++  (completion is polled), so a failure to map it is only logged. The one thing software cannot catch: a window the
++  hypervisor (Gunyah) does not map for the VM faults on its first access (logged just before it: `cpufreq: probing CPUCP SCMI
++  ...`). `armcpu_cpufreq_state`: 0 not started, 1 probing (also while a start waits for its retry), 2 running, 3 off.
+ 
+-Code: `ScmiPerf.h` (transport and PERF messages), `CpuFreqGovernor.h` (modes, governor, GPU heat caps, row), the thread in
+-`ArmCpu.cpp`. Host test with a fake CPUCP thread (both level tables, timeouts, statuses, short answers, thermal lowering, the
+-GPU heat caps, the governor's rules, the screen-off policy with its lifts, the display coming back and random screen windows,
+-scenarios on a workload model of eight CPUs with 10 ms idle ticks, random windows against its invariants, extreme windows
+-against a 128-bit reference of the demand): `Test/scmi-perf.cpp`,
++Code: `ScmiPerf.h` (transport, PERF messages, which failures are transient), `CpuFreqGovernor.h` (modes, governor, GPU heat
++caps, retries and their budgets, row), the thread in `ArmCpu.cpp`. Host test with a fake CPUCP thread (both level tables,
++timeouts, statuses, short answers, thermal lowering, the GPU heat caps, the governor's rules, the screen-off policy with its
++lifts, the display coming back and random screen windows, scenarios on a workload model of eight CPUs with 10 ms idle ticks,
++random windows against its invariants, extreme windows against a 128-bit reference of the demand; the retries: pkgD2's BUSY
++check replayed, BUSY bursts on level sets with the exact backoff and no message during it, BUSY for good, intermittent late
++answers, a stall, a CPUCP that stops answering, start retries, PERF_LIMITS_GET BUSY, mode 1, log rationing, checks left out,
++random faults against the invariants): `Test/scmi-perf.cpp`,
+ `xcrun clang++ -std=c++17 -O1 -g -Wall -Wextra -Werror -fsanitize=address,undefined -fno-sanitize-recover=all
+ Test/scmi-perf.cpp -o /tmp/scmi-perf`.
+ 
+--- a/drivers/PaganiArmCpu/Test/scmi-perf.cpp
++++ b/drivers/PaganiArmCpu/Test/scmi-perf.cpp
+@@ -38,6 +38,7 @@
+ };
+ 
+ enum FaultKind { kNone, kSilent, kLate, kStatusCode, kCut, kWrongToken, kWrongMessage, kErrorBit, kOversize, kCountsDrift, kNoProgress };
++static const uint32_t kAnyMessage = 0xff;      // a Fault on every message of its protocol
+ struct Fault {
+     uint32_t protocol = 0, message = 0;
+     unsigned skip = 0;              // let this many matching messages through first
+@@ -81,10 +82,18 @@
+         wake_.notify_all();
+         worker_.join();
+     }
++    std::atomic<unsigned> rung{0};              // doorbells rung: one per message the agent sent
+     void ring(uint32_t value) {
++        rung++;
+         { std::lock_guard<std::mutex> g(lock); rings_.push_back(value); }
+         wake_.notify_all();
+     }
++    // Replaces the faults, their match counts from zero (under the lock: a late answer may still be in flight).
++    void setFaults(const std::vector<Fault> &list) {
++        std::lock_guard<std::mutex> g(lock);
++        faults = list;
++        matched_.assign(faults.size(), 0);
++    }
+     // Waits until every doorbell so far has been handled (late answers included).
+     void settle() {
+         std::unique_lock<std::mutex> g(lock);
+@@ -104,6 +113,14 @@
+             if (m.protocol == scmi::kPerf && m.message == scmi::kLevelSet && m.payload.size() == 2 && m.payload[0] == domain)
+                 v.push_back(m.payload[1]);
+         return v;
++    }
++    // PERF_LEVEL_GET messages for domain `domain`.
++    unsigned gets(unsigned domain) {
++        std::lock_guard<std::mutex> g(lock);
++        unsigned n = 0;
++        for (auto &m : seen)
++            n += m.protocol == scmi::kPerf && m.message == scmi::kLevelGet && m.payload.size() == 1 && m.payload[0] == domain;
++        return n;
+     }
+     void clearSeen() { std::lock_guard<std::mutex> g(lock); seen.clear(); }
+ 
+@@ -160,7 +177,7 @@
+             matched_.resize(faults.size());
+             for (size_t i = 0; i < faults.size(); i++) {
+                 const Fault &f = faults[i];
+-                if (f.protocol != m.protocol || f.message != m.message) continue;
++                if (f.protocol != m.protocol || (f.message != kAnyMessage && f.message != m.message)) continue;
+                 const unsigned n = matched_[i]++;
+                 if (n >= f.skip && (!f.times || n < f.skip + f.times)) { fault = f; break; }
+             }
+@@ -398,12 +415,30 @@
+     uint32_t index = 0, raw = 0;
+     CHECK(scmi::ok(scmi::levelGet(p, 0, &index, &raw)) && raw == 115 && index == 15);
+     printf("ok  PERF v4: five-word levels, level indexing (set/get by index value), unsorted answers sorted\n");
++}
++
++// What ArmCpu.cpp's thread does with a start: controlStart, then controlProbe each time a transient failure left it waiting, once that
++// backoff passed (the simulated clock jumps there; the row says it waits). *tries: the attempts.
++static bool startLikeThread(cpufreq::Control *c, uint32_t mode, uint32_t minMhz, uint64_t *now, unsigned *tries = nullptr)
++{
++    bool on = cpufreq::controlStart(c, mode, minMhz, *now);
++    unsigned n = 1;
++    while (!on && c->retry.waiting) {
++        CHECK(c->retry.at > *now && !c->on && row(c).rfind("CPU scmi retry: ", 0) == 0);
++        *now = c->retry.at;
++        on = cpufreq::controlProbe(c, *now);
++        n++;
++        CHECK(n <= cpufreq::kRetryBudget);
++    }
++    if (tries) *tries = n;
++    return on;
+ }
+ 
+ static void expectOff(FakeCpucp *fake, uint32_t mode, const char *why, unsigned sets = 0)
+ {
+     cpufreq::Control *c = control(fake);
+-    const bool on = cpufreq::controlStart(c, mode, 0, 1000 * MS);
++    uint64_t now = 1000 * MS;
++    const bool on = startLikeThread(c, mode, 0, &now);
+     fake->settle();
+     if (on) fprintf(stderr, "started, expected \"%s\"\n", why);
+     CHECK(!on && !c->on);
+@@ -416,15 +451,18 @@
+ 
+ static void testFailures()
+ {
+-    { FakeCpucp f; f.faults.push_back({0x13, 8, 0, 1, kSilent}); expectOff(&f, 1, "timeout lvl get"); }
++    // A platform that stops answering (the boot level's PERF_LEVEL_GET never answered, the channel held from then on): the start is tried
++    // again until kSilentBudget missing answers in a row, the reason named after the first.
++    { FakeCpucp f; f.faults.push_back({0x13, 8, 0, 1, kSilent}); expectOff(&f, 1, "timeout lvl get x6"); }
+     { FakeCpucp f; Fault x{0x13, 7, 0, 1, kStatusCode}; x.code = -3; f.faults.push_back(x); expectOff(&f, 1, "status -3 lvl set", 1); }
+     { FakeCpucp f; f.faults.push_back({0x13, 4, 1, 1, kCut}); expectOff(&f, 2, "short describe"); }
+     { FakeCpucp f; f.faults.push_back({0x13, 4, 0, 1, kCountsDrift}); expectOff(&f, 2, "bad levels describe"); }
+     { FakeCpucp f; f.faults.push_back({0x13, 4, 2, 1, kCountsDrift}); expectOff(&f, 2, "bad levels describe"); }
+     { FakeCpucp f; f.faults.push_back({0x13, 4, 1, 1, kNoProgress}); expectOff(&f, 2, "bad levels describe"); }
+     { FakeCpucp f; f.model.extraLevels = 17; expectOff(&f, 2, "levels>32 describe"); }
+-    { FakeCpucp f; f.faults.push_back({0x10, 0, 0, 1, kErrorBit}); expectOff(&f, 1, "chan error base ver"); }
+-    { FakeCpucp f; f.faults.push_back({0x10, 0, 0, 1, kWrongToken}); expectOff(&f, 1, "timeout base ver"); }
++    // The error bit and an answer with another token (no answer of ours in time) are the transport's: retried, off once they persist.
++    { FakeCpucp f; f.faults.push_back({0x10, 0, 0, 0, kErrorBit}); expectOff(&f, 1, "chan error base ver x6"); }
++    { FakeCpucp f; f.faults.push_back({0x10, 0, 0, 0, kWrongToken}); expectOff(&f, 1, "timeout base ver x6"); }
+     { FakeCpucp f; f.faults.push_back({0x13, 0, 0, 1, kWrongMessage}); expectOff(&f, 1, "bad header perf ver"); }
+     { FakeCpucp f; f.faults.push_back({0x13, 1, 0, 1, kOversize}); expectOff(&f, 1, "short perf attr"); }
+     { FakeCpucp f; Fault x{0x13, 3, 1, 1, kCut}; x.keep = 3; f.faults.push_back(x); expectOff(&f, 1, "short dom attr"); }
+@@ -444,11 +482,11 @@
+     { FakeCpucp f; f.model.domains = 1; expectOff(&f, 1, "domains perf attr"); }
+     { FakeCpucp f; f.model.noSet = true; expectOff(&f, 1, "no lvl set dom attr"); }
+     { FakeCpucp f; Fault x{0x13, 3, 1, 1, kStatusCode}; x.code = -4; f.faults.push_back(x); expectOff(&f, 2, "status -4 dom attr"); }
+-    // A channel the platform never frees: waited for, never written over.
++    // A channel the platform never frees: waited for, never written over; tried again until kSilentBudget.
+     {
+         FakeCpucp f;
+         f.mem[scmi::kChannelStatus / 4].store(0);
+-        expectOff(&f, 1, "chan busy base ver");
++        expectOff(&f, 1, "chan busy base ver x6");
+         CHECK(f.messages().empty() && f.mem[scmi::kHeader / 4].load() == 0);
+     }
+     // In interrupt context nothing is touched.
+@@ -490,8 +528,9 @@
+         memset(&c, 0, sizeof(c));
+         CHECK(!cpufreq::controlStart(&c, 1, 0, 0) && !strcmp(c.reason, "not mapped"));
+     }
+-    printf("ok  failures switch the feature off with their reason: timeouts, statuses, short/oversized/inconsistent answers, wrong token or "
+-           "message, error bit, versions, domains, no level set, busy channel, interrupt context, late answers, unmapped\n");
++    printf("ok  final failures switch the feature off with their reason (refusing statuses, short/oversized/inconsistent answers, wrong "
++           "message, versions, domains, no level set, interrupt context, unmapped); missing answers that persist (timeouts, wrong token, "
++           "error bit, a channel never free) after kSilentBudget start attempts; late answers\n");
+ }
+ 
+ static void testMax()
+@@ -533,13 +572,21 @@
+     CHECK(row(c) == "CPU max 3072/4320MHz lv13!/15 ld -/-% thr 3 err 1");
+     fake.model.cap[0] = 15;
+     CHECK(cpufreq::controlCheck(c, 31000 * MS) && c->on);
+-    // Its timeout is a failure like any other.
++    // Its missing answer leaves the line without the limits and is retried like any other: a platform that never answers again (the
++    // channel held from then on) ends it after kSilentBudget missing answers in a row (mode 1: the top level owed again each window).
+     {
+         FakeCpucp f;
+         f.model.cap[0] = 10;
+         f.faults.push_back({0x13, 6, 0, 1, kSilent});
+         cpufreq::Control *o = control(&f);
+-        CHECK(!cpufreq::controlStart(o, cpufreq::kModeMax, 0, 0) && !strcmp(o->reason, "timeout lim get"));
++        uint64_t t = 0;
++        CHECK(cpufreq::controlStart(o, cpufreq::kModeMax, 0, t) && o->on);
++        CHECK(logged("cpufreq: d0 at lv10 2400MHz, asked lv15 3532MHz, limits no answer") && o->retry.pending == 1);
++        CHECK(logged("cpufreq: retry: timeout lim get d0 after lvl get d0, next in 20 ms"));
++        unsigned windows = 0;
++        uint64_t b[2] = {0, 0}, sp[2] = {MS, MS};
++        while (o->on && windows < 20) { t += 1000 * MS; cpufreq::controlWindow(o, t, b, sp, 0, 0); windows++; }
++        CHECK(!o->on && windows == 5 && !strcmp(o->reason, "timeout lim get x6") && row(o) == "CPU scmi off: timeout lim get x6");
+     }
+     // A LEVEL_GET failing in a later check switches it off.
+     fake.faults.push_back({0x13, 8, 0, 1, kCut});
+@@ -699,14 +746,31 @@
+             CHECK(cpufreq::controlWindow(o, t, busy, span, 0, 0));
+         }
+         CHECK(o->level[0] == 6 && o->level[1] == 3);
++        // BUSY at that set: retried in the next window, the level goes through, the feature stays on.
+         Fault busyStatus{0x13, 7, 0, 1, kStatusCode};
+         busyStatus.code = -6;
+-        f.faults.push_back(busyStatus);
++        f.setFaults({busyStatus});
++        t += 20 * MS;
++        loads(busy, span, 90, 0);
++        CHECK(cpufreq::controlWindow(o, t, busy, span, 0, 0) && o->on && o->level[0] == 6 && o->retry.pending == 1);
+         t += 20 * MS;
++        CHECK(cpufreq::controlWindow(o, t, busy, span, 0, 0) && o->on && o->level[0] == 14 && o->retry.pending == 0);   // a burst: 2 x
++        CHECK(f.sets(0).size() >= 2 && f.sets(0).back() == 3321600 && row(o).find(" err 1") != std::string::npos);
++        for (unsigned w = 0; w < 60; w++) {
++            t += 20 * MS;
++            loads(busy, span, 0, 0);
++            CHECK(cpufreq::controlWindow(o, t, busy, span, 0, 0));
++        }
++        CHECK(o->level[0] == 6 && o->level[1] == 3);
++        // A final status (GENERIC_ERROR) at a set: off, both domains asked back to their boot levels.
++        Fault generic{0x13, 7, 0, 1, kStatusCode};
++        generic.code = -8;
++        f.setFaults({generic});
++        t += 20 * MS;
+         loads(busy, span, 90, 0);
+         CHECK(!cpufreq::controlWindow(o, t, busy, span, 0, 0) && !o->on);
+         f.settle();
+-        CHECK(!strcmp(o->reason, "status -6 lvl set") && row(o) == "CPU scmi off: status -6 lvl set");
++        CHECK(!strcmp(o->reason, "status -8 lvl set") && row(o) == "CPU scmi off: status -8 lvl set");
+         CHECK(f.sets(0).back() == 1996800 && f.sets(1).back() == 1958400);          // back to the boot levels
+         CHECK(logged("cpufreq: d0 back to boot lv8: ok") && logged("cpufreq: d1 back to boot lv4: ok"));
+         CHECK(o->level[0] == 8 && o->level[1] == 4);
+@@ -1561,6 +1625,7 @@
+                         c.level[0] = c.level[1] = level; c.seen[0] = c.seen[1] = seen; c.load[0] = c.load[1] = load;
+                         c.below[0] = c.below[1] = seen < level;
+                         c.gov.boosts = count; c.lowered = count; c.errors = count; c.gov.heatCaps = count;
++                        c.retry.busy = count; c.retry.missing = count;
+                         const std::string text = row(&c);
+                         if (text.size() > widest) widest = (unsigned)text.size();
+                     }
+@@ -1573,17 +1638,680 @@
+     c.below[0] = c.below[1] = false;
+     CHECK(row(&c) == "CPU 9999/9999MHz lv31/31 ld 100/100% boost 999 thr 999 err 999");   // " hot 999" would make 70: left out
+     c.gov.boosts = c.lowered = c.errors = 0; c.gov.heatCaps = 7;
++    c.retry.busy = c.retry.missing = 0;
+     CHECK(row(&c) == "CPU 9999/9999MHz lv31/31 ld 100/100% boost 0 thr 0 err 0 hot 7");
++    // "err": the refused optional messages and the retried failures (BUSY answers, missing answers), at most 999.
++    c.errors = 1; c.retry.busy = 2; c.retry.missing = 3;
++    CHECK(row(&c) == "CPU 9999/9999MHz lv31/31 ld 100/100% boost 0 thr 0 err 6 hot 7");
++    c.errors = 0xffffffffu; c.retry.busy = 0xffffffffu; c.retry.missing = 0xffffffffu;
++    CHECK(row(&c) == "CPU 9999/9999MHz lv31/31 ld 100/100% boost 0 thr 0 err 999 hot 7");
+     // The off row with the longest reason stays within it as well.
+     c.on = false;
+     strcpy(c.reason, "status -2147483648 lvl set");
+     CHECK(row(&c) == "CPU scmi off: status -2147483648 lvl set");
++    // A budget's count after the reason (controlFail): the longest still fits the 40-byte reason and the row.
++    {
++        cpufreq::Control o;
++        memset(&o, 0, sizeof(o));
++        gLog.clear();
++        o.log = logLine;
++        cpufreq::controlFail(&o, scmi::fail(scmi::kStatus, scmi::kPerf, scmi::kDomainAttributes, INT32_MIN), 0xffffffffu);
++        CHECK(!strcmp(o.reason, "status -2147483648 dom attr x4294967295") && strlen(o.reason) == sizeof(o.reason) - 1);
++        CHECK(row(&o) == "CPU scmi off: status -2147483648 dom attr x4294967295" && logged("cpufreq: off: status -2147483648 dom attr x4"));
++        cpufreq::controlFail(&o, scmi::fail(scmi::kTimeout, scmi::kPerf, scmi::kLevelGet), 1);
++        CHECK(!strcmp(o.reason, "timeout lvl get"));
++    }
++    // While the start waits for its retry: the latest failure.
++    c.retry.waiting = true;
++    c.retry.last = scmi::fail(scmi::kStatus, scmi::kPerf, scmi::kDescribeLevels, INT32_MIN);
++    CHECK(row(&c) == "CPU scmi retry: status -2147483648 describe");
++    c.retry.waiting = false;
+     char tiny[8];
+     cpufreq::controlRow(&c, tiny, sizeof(tiny));
+     CHECK(!strcmp(tiny, "CPU scm"));
+     printf("ok  floor from MHz, row texts (widest %u of %u characters)\n", widest, cpufreq::kRowWidth);
++}
++
++// ---- Transient SCMI failures (CpuFreqGovernor.h, Retry): BUSY answers and missing answers retried after a backoff, the budgets, what is
++// owed after a failure, log rationing. Measured 2026-10-31 (pkgD2, 41.849 s): one "status -6 lvl get" in a 5 s check ended the governor
++// for the boot and left the clusters at their boot levels (about 1997 / 1018 MHz) for the rest of it.
++
++static Fault busyOn(uint32_t message, unsigned skip, unsigned times)
++{
++    Fault f{scmi::kPerf, message, skip, times, kStatusCode};
++    f.code = -6;
++    return f;
++}
++
++static unsigned countLogged(const char *part)
++{
++    unsigned n = 0;
++    for (auto &line : gLog) n += line.find(part) != std::string::npos;
++    return n;
++}
++
++static std::string format(const char *pattern, unsigned a, unsigned b = 0, unsigned c = 0)
++{
++    char text[200];
++    snprintf(text, sizeof(text), pattern, a, b, c);
++    return text;
++}
++
++static void testRetryRules()
++{
++    using scmi::fail;
++    CHECK(scmi::classify(fail(scmi::kStatus, scmi::kPerf, scmi::kLevelGet, -6)) == scmi::kRetryBusy);
++    CHECK(scmi::classify(fail(scmi::kStatus, scmi::kPerf, scmi::kLevelGet, -7)) == scmi::kRetrySilent);
++    for (int32_t status : {-1, -2, -3, -4, -5, -8, -9, -10, -11, -12, 1, 6, 7, INT32_MIN, INT32_MAX})
++        CHECK(scmi::classify(fail(scmi::kStatus, scmi::kPerf, scmi::kLevelSet, status)) == scmi::kFinal);
++    for (scmi::Error e : {scmi::kBusy, scmi::kTimeout, scmi::kChannelErr})
++        CHECK(scmi::classify(fail(e, scmi::kPerf, scmi::kLevelSet)) == scmi::kRetrySilent);
++    for (scmi::Error e : {scmi::kOk, scmi::kNotReady, scmi::kInterrupt, scmi::kShort, scmi::kBadHeader, scmi::kBadVersion,
++                          scmi::kFewDomains, scmi::kNoLevelSet, scmi::kBadLevels, scmi::kTooManyLevels, scmi::kUnknownLevel,
++                          scmi::kBadDomain})
++        CHECK(scmi::classify(fail(e, scmi::kPerf, scmi::kLevelSet)) == scmi::kFinal);
++    // The backoff: 20 ms (the next governor window) doubled per failure in a row, 1280 ms from the 7th on.
++    const uint32_t expect[] = {20, 20, 40, 80, 160, 320, 640, 1280, 1280, 1280};
++    for (uint32_t n = 0; n < 10; n++) CHECK(cpufreq::retryMs(n) == expect[n]);
++    CHECK(cpufreq::retryMs(1000000) == 1280 && cpufreq::retryMs(UINT32_MAX) == 1280);
++    uint64_t budget = 0, silent = 0;
++    for (uint32_t n = 1; n < cpufreq::kRetryBudget; n++) budget += cpufreq::retryMs(n);
++    for (uint32_t n = 1; n < cpufreq::kSilentBudget; n++) silent += cpufreq::retryMs(n);
++    CHECK(budget == 53740 && silent == 620);
++    printf("ok  transient results: BUSY (-6), COMMS_ERROR (-7), a timeout, a channel still held and the error bit are retried; every other "
++           "status and every malformed answer is final; backoff 20/40/80/.../1280 ms: kRetryBudget failures in a row take %llu ms, "
++           "kSilentBudget %llu ms of backoff\n", (unsigned long long)budget, (unsigned long long)silent);
++}
++
++// pkgD2 replayed: a 5 s check's PERF_LEVEL_GET answered BUSY (domain 0, domain 1, and domain 0 right after its level set in the same
++// window). The governor stays on, nothing goes out for 20 ms, the check resumes with the domain it stopped at (the other one is neither
++// asked nor counted again), and the levels keep following the load.
++static void testBusyCheck()
++{
++    for (unsigned variant = 0; variant < 3; variant++) {
++        const unsigned busyDomain = variant == 1 ? 1 : 0;
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++        uint64_t busy[2], span[2];
++        auto step = [&](uint32_t p0, uint32_t p1) {
++            now += 20 * MS;
++            loads(busy, span, p0, p1);
++            return cpufreq::controlWindow(c, now, busy, span, 0, 0);
++        };
++        while (now + 20 * MS - c->lastCheck < 5000 * MS) CHECK(step(10, 30));     // quiet: 100% after it is a burst
++        CHECK(c->level[0] == 3 && c->level[1] == 3);
++        fake.settle();
++        const unsigned gets0 = fake.gets(0), gets1 = fake.gets(1), rung = fake.rung;
++        const size_t sets0 = fake.sets(0).size();
++        fake.model.cap[1] = 2;                                  // the platform lowered domain 1: the check counts it once
++        fake.setFaults({busyOn(scmi::kLevelGet, busyDomain, 1)});
++        const uint64_t checkAt = now + 20 * MS;
++        CHECK(step(variant == 2 ? 100 : 10, 30) && c->on);      // variant 2: a burst, domain 0's level set first
++        fake.settle();
++        CHECK(c->lastCheck == 1000 * MS && c->retry.at == checkAt + 20 * MS && c->retry.checked == (busyDomain ? 1u : 0u));
++        CHECK(fake.rung == rung + 1 + busyDomain + (variant == 2 ? 1u : 0u));      // nothing after the BUSY answer
++        CHECK(fake.sets(0).size() == sets0 + (variant == 2 ? 1u : 0u));
++        const char *line = variant == 0 ? "cpufreq: retry: status -6 lvl get d0, next in 20 ms"
++                         : variant == 1 ? "cpufreq: retry: status -6 lvl get d1 after lvl get d0, next in 20 ms"
++                                        : "cpufreq: retry: status -6 lvl get d0 after lvl set d0, next in 20 ms";
++        CHECK(logged(line) && !logged("cpufreq: off"));
++        // Within the backoff nothing goes out; 20 ms later the check resumes and completes.
++        CHECK(step(variant == 2 ? 100 : 10, 30) && c->on && c->lastCheck == checkAt + 20 * MS && c->retry.checked == 0);
++        fake.settle();
++        CHECK(fake.gets(0) == gets0 + (busyDomain ? 1u : 2u) && fake.gets(1) == gets1 + (busyDomain ? 2u : 1u));
++        CHECK(c->lowered == 1 && logged("cpufreq: d1 at lv2 1401MHz, asked lv3 1689MHz, limits lv0-2"));
++        const char *ok = variant == 0 ? "cpufreq: retry ok: lvl get d0 after 1 failure in 20 ms (busy 1, no answer 0)"
++                       : variant == 1 ? "cpufreq: retry ok: lvl get d1 after 1 failure in 20 ms (busy 1, no answer 0)"
++                                      : "cpufreq: retry ok: lvl set d0 after 1 failure in 20 ms (busy 1, no answer 0)";
++        CHECK(logged(ok));
++        CHECK(row(c).find(" err 1 ") != std::string::npos && c->retry.busy == 1 && c->retry.streak == 0);
++        // The levels resume following the load: a burst reaches the top on both domains, the platform with them.
++        fake.model.cap[1] = 15;
++        for (unsigned w = 0; w < 4; w++) CHECK(step(100, 100));
++        fake.settle();
++        CHECK(c->level[0] == 15 && c->level[1] == 15 && fake.model.requested[0] == 15 && fake.model.requested[1] == 15);
++        for (unsigned w = 0; w < 30; w++) CHECK(step(0, 0));
++        fake.settle();
++        CHECK(c->level[0] == 3 && c->level[1] == 3 && fake.model.requested[0] == 3 && fake.model.requested[1] == 3);
++    }
++    printf("ok  pkgD2 replayed: BUSY at a 5 s check's PERF_LEVEL_GET (d0, d1, d0 right after its level set) keeps the governor on, "
++           "nothing for 20 ms, the check resumes where it stopped (no domain asked or counted twice), the levels follow the load\n");
++}
++
++// BUSY bursts on PERF_LEVEL_SET (1, 3, 7, 20 in a row): no message at all while each backoff lasts (20, 40, 80, ... 1280 ms after the
++// failures in a row), the owed set goes out again once it passed, and when the burst ends the platform has the governor's level.
++static void testBusyBursts()
++{
++    for (unsigned burst : {1u, 3u, 7u, 20u}) {
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++        uint64_t busy[2], span[2];
++        for (unsigned w = 0; w < 10; w++) {
++            now += 20 * MS;
++            loads(busy, span, 0, 0);
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++        }
++        CHECK(c->level[0] == 3 && c->level[1] == 3);
++        fake.settle();
++        const size_t s0 = fake.sets(0).size();
++        fake.setFaults({busyOn(scmi::kLevelSet, 0, burst)});
++        std::vector<uint64_t> tries;
++        unsigned quiet = 0;
++        for (unsigned w = 0; w < 2000 && fake.sets(0).size() - s0 <= burst; w++) {
++            now += 20 * MS;
++            loads(busy, span, 100, 0);
++            const bool backoff = now < c->retry.at;
++            const size_t sent = fake.sets(0).size();
++            const unsigned rung = fake.rung;
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0) && c->on);
++            fake.settle();
++            if (backoff) { CHECK(fake.rung == rung); quiet++; }
++            CHECK(fake.sets(0).size() - sent <= 1);
++            if (fake.sets(0).size() > sent) tries.push_back(now);
++        }
++        CHECK(tries.size() == burst + 1);
++        uint64_t took = 0;
++        for (unsigned i = 1; i <= burst; i++) {
++            CHECK(tries[i] - tries[i - 1] == cpufreq::retryMs(i) * MS);
++            took += cpufreq::retryMs(i);
++        }
++        // Resumed: nothing owed, the platform at the level the governor recorded, the top a window or two later.
++        CHECK(c->retry.pending == 0 && c->level[0] >= 9 && fake.model.requested[0] == c->level[0] && c->retry.sets == 0);
++        for (unsigned w = 0; w < 3; w++) {
++            now += 20 * MS;
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++        }
++        fake.settle();
++        CHECK(c->level[0] == 15 && fake.model.requested[0] == 15);
++        CHECK(logged("cpufreq: retry: status -6 lvl set d0, next in 20 ms"));
++        CHECK(logged((format("cpufreq: retry ok: lvl set d0 after %u ", burst) + (burst == 1 ? "failure" : "failures") +
++                      format(" in %u ms (busy %u, no answer 0)", (unsigned)took, burst)).c_str()));
++        CHECK(row(c).find(format(" err %u ", burst)) != std::string::npos && !logged("cpufreq: off"));
++        printf("    BUSY x%u at a level set: tries %u, %u quiet windows, the level through after %llu ms\n", burst, (unsigned)tries.size(),
++               quiet, (unsigned long long)took);
++    }
++    printf("ok  BUSY bursts on PERF_LEVEL_SET: nothing sent while a backoff lasts, retried after 20/40/80/... ms, the level the governor "
++           "wants goes through when the burst ends\n");
++}
++
++// BUSY at every level set from now on: off after kRetryBudget in a row (53.74 s of backoff), the reason named and counted, both domains
++// asked back to their boot levels (BUSY too, logged), nothing more after that; one streak, one line.
++static void testBusyForever()
++{
++    FakeCpucp fake;
++    cpufreq::Control *c = control(&fake);
++    uint64_t now = 1000 * MS;
++    CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++    uint64_t busy[2], span[2];
++    for (unsigned w = 0; w < 10; w++) {
++        now += 20 * MS;
++        loads(busy, span, 0, 0);
++        CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++    }
++    fake.settle();
++    fake.setFaults({busyOn(scmi::kLevelSet, 0, 0)});
++    const size_t s0 = fake.sets(0).size() + fake.sets(1).size();
++    uint64_t first = 0, off = 0;
++    for (unsigned w = 0; w < 10000 && !off; w++) {
++        now += 20 * MS;
++        loads(busy, span, 100, 0);
++        const bool backoff = now < c->retry.at;
++        const unsigned rung = fake.rung;
++        const bool on = cpufreq::controlWindow(c, now, busy, span, 0, 0);
++        fake.settle();
++        if (backoff) CHECK(fake.rung == rung && on);
++        if (!first && c->retry.streak) first = now;
++        if (!on) off = now;
++    }
++    CHECK(off && !c->on && off - first == 53740 * MS);
++    CHECK(!strcmp(c->reason, "status -6 lvl set x48") && row(c) == "CPU scmi off: status -6 lvl set x48");
++    CHECK(logged("cpufreq: off: status -6 lvl set x48"));
++    CHECK(logged("cpufreq: d0 back to boot lv8: status -6 lvl set") && logged("cpufreq: d1 back to boot lv4: status -6 lvl set"));
++    CHECK(fake.sets(0).size() + fake.sets(1).size() == s0 + cpufreq::kRetryBudget + 2);
++    CHECK(countLogged("cpufreq: retry") == 1);
++    const unsigned rung = fake.rung;
++    for (unsigned w = 0; w < 100; w++) {
++        now += 20 * MS;
++        CHECK(!cpufreq::controlWindow(c, now, busy, span, 0, 0));
++    }
++    CHECK(fake.rung == rung);
++    printf("ok  BUSY at every level set: off after %u in a row (%.2f s), \"status -6 lvl set x48\", both domains asked back to their boot "
++           "levels, nothing sent after that, one log line for the streak\n", cpufreq::kRetryBudget, (double)(off - first) / 1e9);
++}
++
++// Missing answers: intermittent late answers (each set then owed and sent again), a stall the platform comes back from, a platform that
++// stops answering for good (off after kSilentBudget, one message a window at most till then), and the boot levels asked back for a domain
++// whose set was left owed even when the level recorded is its boot level.
++static void testTimeouts()
++{
++    {
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++        uint64_t busy[2], span[2];
++        uint32_t maxSilent = 0;
++        for (unsigned w = 0; w < 400; w++) {
++            if (w % 10 == 5) {
++                Fault late{scmi::kPerf, scmi::kLevelSet, 0, 1, kLate};
++                late.lateMs = 70;
++                fake.setFaults({late});
++            }
++            now += 20 * MS;
++            const bool heavy = (w / 25) % 2 == 0;           // 500 ms busy, 500 ms idle: level sets both ways
++            loads(busy, span, heavy ? 100 : 0, heavy ? 100 : 0);
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0) && c->on);
++            if (c->retry.silent > maxSilent) maxSilent = c->retry.silent;
++        }
++        fake.setFaults({});
++        for (unsigned w = 0; w < 80; w++) {
++            now += 20 * MS;
++            loads(busy, span, 0, 0);
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++        }
++        fake.settle();
++        CHECK(c->on && c->retry.missing >= 8 && maxSilent <= 2 && c->retry.pending == 0);
++        CHECK(fake.model.requested[0] == c->level[0] && fake.model.requested[1] == c->level[1] && c->level[0] == 3 && c->level[1] == 3);
++        CHECK(row(c).find(format(" err %u ", c->retry.missing)) != std::string::npos && !logged("cpufreq: off"));
++        printf("    intermittent late answers: %u missing answers over 8 s, at most %u in a row, on throughout, the platform at the "
++               "governor's levels\n", c->retry.missing, maxSilent);
++    }
++    {
++        // A stall: the platform holds the channel 180 ms (timeout at 50 ms, then the channel still held), then answers: on.
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++        Fault stall{scmi::kPerf, scmi::kLevelSet, 0, 1, kLate};
++        stall.lateMs = 180;
++        fake.setFaults({stall});
++        uint64_t busy[2], span[2];
++        uint32_t maxSilent = 0;
++        for (unsigned w = 0; w < 200; w++) {
++            now += 20 * MS;
++            loads(busy, span, 100, 0);
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0) && c->on);
++            if (c->retry.silent > maxSilent) maxSilent = c->retry.silent;
++        }
++        fake.settle();
++        CHECK(maxSilent >= 2 && maxSilent < cpufreq::kSilentBudget && c->level[0] == 15 && fake.model.requested[0] == 15);
++        CHECK(logged("cpufreq: retry: timeout lvl set d0, next in 20 ms") && logged("cpufreq: retry ok: lvl set d0 after "));
++    }
++    {
++        // A platform that stops answering for good: off after kSilentBudget missing answers in a row, named after the first; until then
++        // at most one message a window (each failed transfer the only one of its window), and the restore of both domains last.
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++        uint64_t busy[2], span[2];
++        for (unsigned w = 0; w < 10; w++) {
++            now += 20 * MS;
++            loads(busy, span, 0, 0);
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++        }
++        fake.settle();
++        fake.setFaults({Fault{scmi::kPerf, scmi::kLevelSet, 0, 1, kSilent}});
++        unsigned windows = 0, attempts = 0;
++        double longest = 0;
++        bool on = true;
++        const uint64_t began = now + 20 * MS;
++        while (on && windows < 200) {
++            now += 20 * MS;
++            loads(busy, span, 100, 0);
++            const uint64_t silentBefore = c->retry.silent;
++            const auto t0 = std::chrono::steady_clock::now();
++            on = cpufreq::controlWindow(c, now, busy, span, 0, 0);
++            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
++            if (ms > longest) longest = ms;
++            attempts += c->retry.silent != silentBefore || !on;
++            windows++;
++        }
++        CHECK(!on && !strcmp(c->reason, "timeout lvl set x6") && attempts == cpufreq::kSilentBudget);
++        CHECK(now - began == 620 * MS);                         // 20 + 40 + 80 + 160 + 320 ms of backoff
++        CHECK(logged("cpufreq: d0 back to boot lv8: chan busy lvl set") && logged("cpufreq: d1 back to boot lv4: chan busy lvl set"));
++        CHECK(countLogged("cpufreq: retry") == 1 && row(c) == "CPU scmi off: timeout lvl set x6");
++        printf("    a platform that stops answering: off after %u missing answers (%u windows, 0.62 s of backoff), the longest window "
++               "%.0f ms (three 50 ms waits at most: the failure, then the two restores)\n", attempts, windows, longest);
++        CHECK(longest < 1000);
++    }
++    {
++        // Owed sets are asked back too: d0's level set to the top unanswered in time (the platform applied it late), its level recorded
++        // still the boot one; then a final failure: d0 asked back to its boot level all the same, d1 (nothing owed, at its boot level) not.
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++        fake.setFaults({Fault{scmi::kPerf, scmi::kLevelSet, 0, 1, kWrongToken}});
++        uint64_t busy[2], span[2];
++        now += 20 * MS;
++        loads(busy, span, 100, 40);
++        CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0) && c->on && c->retry.pending == 1 && c->level[0] == 8);
++        fake.settle();
++        CHECK(fake.model.requested[0] == 15 && c->level[1] == 4);
++        Fault denied{scmi::kPerf, scmi::kLevelSet, 0, 1, kStatusCode};
++        denied.code = -3;
++        fake.setFaults({denied});
++        now += 20 * MS;
++        CHECK(!cpufreq::controlWindow(c, now, busy, span, 0, 0) && !strcmp(c->reason, "status -3 lvl set"));
++        fake.settle();
++        CHECK(logged("cpufreq: d0 back to boot lv8: ok") && !logged("cpufreq: d1 back to boot") && fake.model.requested[0] == 8);
++    }
++    printf("ok  missing answers: intermittent late answers retried (the set owed and sent again), a 180 ms stall recovered, a platform "
++           "that stops answering off after kSilentBudget, an owed level set asked back to the boot level\n");
+ }
+ 
++// The start: BUSY at its first message (waits of 20, 40, 80 ms, the row saying why), BUSY for good (off after kRetryBudget attempts),
++// transport failures once (the next attempt runs), and a message without an answer of ours in ten attempts in a row while the others
++// are answered (the platform is there: no kSilentBudget).
++static void testStartRetry()
++{
++    {
++        FakeCpucp f;
++        Fault x{scmi::kBase, scmi::kVersion, 0, 3, kStatusCode};
++        x.code = -6;
++        f.setFaults({x});
++        cpufreq::Control *c = control(&f);
++        const uint64_t now = 1000 * MS;
++        CHECK(!cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now) && c->retry.waiting && !c->on && !c->reason[0]);
++        CHECK(row(c) == "CPU scmi retry: status -6 base ver" && c->retry.at == now + 20 * MS);
++        CHECK(logged("cpufreq: retry: status -6 base ver, next in 20 ms") && !logged("cpufreq: off"));
++        // Called before its backoff passed: still waiting, nothing sent.
++        CHECK(!cpufreq::controlProbe(c, now + 19 * MS) && c->retry.waiting && f.count(scmi::kBase, scmi::kVersion) == 1);
++        std::vector<uint64_t> at;
++        while (c->retry.waiting) {
++            at.push_back(c->retry.at);
++            cpufreq::controlProbe(c, c->retry.at);
++            CHECK(at.size() < 10);
++        }
++        CHECK(c->on && at.size() == 3 && at[0] == now + 20 * MS && at[1] == at[0] + 40 * MS && at[2] == at[1] + 80 * MS);
++        CHECK(logged("cpufreq: retry ok: start after 3 failures in 140 ms (busy 3, no answer 0)") && c->lastCheck == at[2]);
++        CHECK(logged("cpufreq: scmi base 2.0 perf 3.0 domains 2") && logged("cpufreq: governor floor"));
++        CHECK(row(c) == "CPU 1996/1958MHz lv8/4 ld -/-% boost 0 thr 0 err 3 hot 0");
++        CHECK(cpufreq::controlProbe(c, at[2] + MS) && f.count(scmi::kBase, scmi::kVersion) == 4);    // on already: nothing sent
++    }
++    {
++        FakeCpucp f;
++        Fault x{scmi::kPerf, scmi::kAttributes, 0, 0, kStatusCode};
++        x.code = -6;
++        f.setFaults({x});
++        cpufreq::Control *c = control(&f);
++        uint64_t now = 1000 * MS;
++        const uint64_t start = now;
++        unsigned tries = 0;
++        CHECK(!startLikeThread(c, cpufreq::kModeGovernor, 0, &now, &tries) && !c->on && !c->retry.waiting);
++        CHECK(tries == cpufreq::kRetryBudget && now - start == 53740 * MS && !strcmp(c->reason, "status -6 perf attr x48"));
++        CHECK(f.count(scmi::kPerf, scmi::kAttributes) == cpufreq::kRetryBudget && f.sets(0).empty() && f.sets(1).empty());
++        CHECK(!cpufreq::controlProbe(c, now + 1000 * MS) && f.count(scmi::kPerf, scmi::kAttributes) == cpufreq::kRetryBudget);
++        CHECK(row(c) == "CPU scmi off: status -6 perf attr x48");
++    }
++    for (FaultKind kind : {kErrorBit, kWrongToken, kLate}) {
++        FakeCpucp f;
++        Fault x{scmi::kPerf, scmi::kDescribeLevels, 2, 1, kind};
++        x.lateMs = 80;
++        f.setFaults({x});
++        cpufreq::Control *c = control(&f);
++        uint64_t now = 1000 * MS;
++        unsigned tries = 0;
++        CHECK(startLikeThread(c, cpufreq::kModeGovernor, 0, &now, &tries));
++        CHECK(tries >= 2 && tries <= (kind == kLate ? 4u : 2u) && c->retry.missing == tries - 1 && c->perf.domain[1].count == 16);
++    }
++    {
++        FakeCpucp f;
++        f.setFaults({Fault{scmi::kPerf, scmi::kDescribeLevels, 0, 10, kWrongToken}});
++        cpufreq::Control *c = control(&f);
++        uint64_t now = 1000 * MS;
++        unsigned tries = 0;
++        CHECK(startLikeThread(c, cpufreq::kModeGovernor, 0, &now, &tries) && tries == 11 && c->retry.missing == 10);
++    }
++    printf("ok  the start: BUSY retried after 20/40/80 ms (row \"CPU scmi retry: ...\"), off after kRetryBudget attempts of BUSY, "
++           "transport failures once survived, unanswered messages amid answered ones never count as a silent platform\n");
++}
++
++// PERF_LIMITS_GET (optional) answered BUSY or not at all: the lowering's line says so, the queries go on (only a refusal stops them),
++// the check completes with the other domain after the backoff.
++static void testLimitsTransient()
++{
++    FakeCpucp fake;
++    cpufreq::Control *c = control(&fake);
++    uint64_t now = 1000 * MS;
++    CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++    uint64_t busy[2], span[2];
++    auto step = [&]() {
++        now += 20 * MS;
++        loads(busy, span, 0, 0);
++        return cpufreq::controlWindow(c, now, busy, span, 0, 0);
++    };
++    for (unsigned w = 0; w < 10; w++) CHECK(step());
++    fake.model.cap[0] = 2;
++    fake.setFaults({busyOn(scmi::kLimitsGet, 0, 1)});
++    while (!c->lowered) CHECK(step());
++    const uint64_t at = now;
++    CHECK(c->on && c->limits && c->errors == 0 && c->retry.checked == 1 && c->lastCheck < at);
++    CHECK(logged("cpufreq: d0 at lv2 748MHz, asked lv3 960MHz, limits busy"));
++    CHECK(logged("cpufreq: retry: status -6 lim get d0 after lvl get d0, next in 20 ms"));
++    CHECK(step() && c->lastCheck == at + 20 * MS && c->retry.checked == 0 && fake.gets(0) == 2 && fake.gets(1) == 2);
++    fake.model.cap[0] = 1;
++    uint32_t lowered = c->lowered;
++    while (c->lowered == lowered) CHECK(step());
++    CHECK(logged("cpufreq: d0 at lv1 556MHz, asked lv3 960MHz, limits lv0-1"));
++    fake.model.cap[0] = 0;
++    Fault late{scmi::kPerf, scmi::kLimitsGet, 0, 1, kLate};
++    late.lateMs = 80;
++    fake.setFaults({late});
++    lowered = c->lowered;
++    while (c->lowered == lowered) CHECK(step());
++    CHECK(logged("cpufreq: d0 at lv0 384MHz, asked lv3 960MHz, limits no answer") && c->limits && c->on);
++    const uint64_t lateAt = now;
++    for (unsigned w = 0; w < 5; w++) CHECK(step());
++    fake.settle();
++    CHECK(c->retry.streak == 0 && c->lastCheck > lateAt && c->retry.checked == 0);
++    // A refusal still stops them, counted in err with the retried failures.
++    fake.model.cap[0] = 2;
++    Fault refused{scmi::kPerf, scmi::kLimitsGet, 0, 1, kStatusCode};
++    refused.code = -3;
++    fake.setFaults({refused});
++    lowered = c->lowered;
++    while (c->lowered == lowered) CHECK(step());
++    CHECK(!c->limits && c->errors == 1 && logged("cpufreq: d0 at lv2 748MHz, asked lv3 960MHz, limits status -3"));
++    CHECK(row(c).find(" err 3 ") != std::string::npos && c->on);
++    printf("ok  PERF_LIMITS_GET BUSY or unanswered: the line says so, still asked at the next lowering, the check completes after the "
++           "backoff; a refusal stops it\n");
++}
++
++// pagani-cpufreq=1: BUSY at the start's first top level set leaves both domains' top levels owed (the second deferred by the backoff):
++// the next 1 s window sends both; a 5 s check that met BUSY resumes in the next window and re-asserts a lowered top.
++static void testMaxRetry()
++{
++    FakeCpucp fake;
++    fake.setFaults({busyOn(scmi::kLevelSet, 0, 1)});
++    cpufreq::Control *c = control(&fake);
++    uint64_t now = 1000 * MS;
++    CHECK(cpufreq::controlStart(c, cpufreq::kModeMax, 0, now) && c->on);
++    CHECK(c->level[0] == 8 && c->level[1] == 4 && c->retry.pending == 3);
++    fake.settle();
++    CHECK(fake.sets(0).size() == 1 && fake.sets(1).empty() && fake.count(scmi::kPerf, scmi::kLevelGet) == 2);
++    uint64_t b[2] = {0, 0}, sp[2] = {MS, MS};
++    now += 1000 * MS;
++    CHECK(cpufreq::controlWindow(c, now, b, sp, 0, 0) && c->level[0] == 15 && c->level[1] == 15 && c->retry.pending == 0);
++    fake.settle();
++    CHECK(fake.model.requested[0] == 15 && fake.model.requested[1] == 15);
++    CHECK(row(c) == "CPU max 3532/4320MHz lv15/15 ld -/-% thr 0 err 1");
++    fake.setFaults({busyOn(scmi::kLevelGet, 0, 1)});
++    fake.model.cap[1] = 12;
++    while (c->retry.busy < 2) {
++        now += 1000 * MS;
++        CHECK(cpufreq::controlWindow(c, now, b, sp, 0, 0));
++    }
++    CHECK(c->lastCheck == 1000 * MS && c->lowered == 0);
++    const size_t sets = fake.sets(1).size();
++    now += 1000 * MS;
++    CHECK(cpufreq::controlWindow(c, now, b, sp, 0, 0) && c->lastCheck == now && c->lowered == 1);
++    fake.settle();
++    CHECK(logged("cpufreq: d1 at lv12 3801MHz, asked lv15 4320MHz, limits lv0-12") && fake.sets(1).size() == sets + 1);
++    printf("ok  pagani-cpufreq=1: owed top levels sent in the next window, a check met by BUSY resumed and re-asserting the top\n");
++}
++
++// Log rationing: 100 streaks (BUSY at each 5 s check's first PERF_LEVEL_GET for 8 minutes): lines for the first kRetryLines streaks
++// (start and end), then a summary at most once a minute; the row counts all of them.
++static void testRetryRationing()
++{
++    FakeCpucp fake;
++    cpufreq::Control *c = control(&fake);
++    uint64_t now = 1000 * MS;
++    CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++    uint64_t busy[2], span[2];
++    loads(busy, span, 0, 0);
++    const size_t before = gLog.size();
++    unsigned injected = 0;                  // (not "checks": CHECK counts in that name)
++    while (injected < 100 || c->retry.streak) {
++        if (injected < 100 && now + 20 * MS - c->lastCheck >= 5000 * MS && !c->retry.streak) {
++            fake.setFaults({busyOn(scmi::kLevelGet, 0, 1)});
++            injected++;
++        }
++        now += 20 * MS;
++        CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++    }
++    fake.settle();
++    CHECK(c->on && c->retry.busy == 100 && c->retry.streaks == 100 && c->retry.longest == 1);
++    CHECK(countLogged("cpufreq: retry: ") == cpufreq::kRetryLines && countLogged("cpufreq: retry ok: ") == cpufreq::kRetryLines);
++    const unsigned summaries = countLogged("cpufreq: retries since boot: ");
++    CHECK(summaries == 8 && gLog.size() - before == 2 * cpufreq::kRetryLines + summaries);
++    CHECK(logged("cpufreq: retries since boot: busy 9, no answer 0, 9 streaks, longest 1, checks left out 0 (a line a minute at most)"));
++    CHECK(row(c).find(" err 100 ") != std::string::npos);
++    printf("ok  log rationing: 100 BUSY streaks over %.0f s: %u lines for the first %u, then %u summaries (a minute apart at least); "
++           "err 100 on the row\n", (double)(now - 1000 * MS) / 1e9, 2 * cpufreq::kRetryLines, cpufreq::kRetryLines, summaries);
++}
++
++// A check that keeps meeting BUSY is left out after kCheckTries (the governor goes on, the next check kCheckMs later): bounded traffic.
++static void testCheckLeftOut()
++{
++    FakeCpucp fake;
++    cpufreq::Control *c = control(&fake);
++    uint64_t now = 1000 * MS;
++    CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++    fake.setFaults({busyOn(scmi::kLevelGet, 0, 0)});
++    uint64_t busy[2], span[2];
++    unsigned windows = 0;
++    for (; windows < 3000; windows++) {
++        now += 20 * MS;
++        loads(busy, span, (windows / 100) % 2 ? 100 : 0, 0);     // the governor keeps changing levels meanwhile
++        CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0) && c->on);
++    }
++    fake.settle();
++    const unsigned gets = fake.gets(0) + fake.gets(1);
++    CHECK(c->retry.skipped >= 10 && c->retry.skipped <= 12 && gets == 2 + cpufreq::kCheckTries * c->retry.skipped + c->retry.checks);
++    CHECK(logged("cpufreq: 5 s check left out after 4 failed tries (last: status -6 lvl get d0), the next in 5 s"));
++    CHECK(fake.model.requested[0] == c->level[0] && c->retry.pending == 0);
++    printf("ok  a check that keeps meeting BUSY: left out after %u tries each time (%u checks in 60 s, %u PERF_LEVEL_GETs), the "
++           "governor's level sets go through meanwhile\n", cpufreq::kCheckTries, c->retry.skipped, gets);
++}
++
++// pagani-cpufreq-retry=0 (Control::noRetry): every failure final again, as before the retries: pkgD2's BUSY check switches it off with
++// the domains asked back to their boot levels, a BUSY start is off at once.
++static void testNoRetry()
++{
++    {
++        FakeCpucp fake;
++        cpufreq::Control *c = control(&fake);
++        c->noRetry = true;
++        uint64_t now = 1000 * MS;
++        CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now) && logged(", mode 2, no retries"));
++        uint64_t busy[2], span[2];
++        while (now + 20 * MS - c->lastCheck < 5000 * MS) {
++            now += 20 * MS;
++            loads(busy, span, 10, 30);
++            CHECK(cpufreq::controlWindow(c, now, busy, span, 0, 0));
++        }
++        fake.setFaults({busyOn(scmi::kLevelGet, 0, 1)});
++        now += 20 * MS;
++        CHECK(!cpufreq::controlWindow(c, now, busy, span, 0, 0) && !c->on && !strcmp(c->reason, "status -6 lvl get"));
++        fake.settle();
++        CHECK(logged("cpufreq: off: status -6 lvl get") && logged("cpufreq: d0 back to boot lv8: ok") &&
++              logged("cpufreq: d1 back to boot lv4: ok") && !logged("cpufreq: retry"));
++    }
++    {
++        FakeCpucp f;
++        f.setFaults({busyOn(scmi::kAttributes, 0, 1)});
++        cpufreq::Control *c = control(&f);
++        c->noRetry = true;
++        CHECK(!cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, 1000 * MS) && !c->retry.waiting);
++        CHECK(!strcmp(c->reason, "status -6 perf attr"));
++    }
++    printf("ok  pagani-cpufreq-retry=0: every failure final as before (BUSY at a check: off and back to the boot levels; at the start: "
++           "off)\n");
++}
++
++// Random faults over random windows: BUSY on any message or on level sets or gets (bursts of 1-12), late answers, the error bit, other
++// tokens; never a final one, never a new fault before the last one was resolved. Invariants: on throughout (no budget runs out), no
++// message while a backoff lasts, at most four messages a window, the levels between the floor and the top, and 1.4 s after the faults
++// stop nothing owed and the platform at the levels the governor recorded.
++static void testRetryRandom()
++{
++    FakeCpucp fake;
++    cpufreq::Control *c = control(&fake);
++    uint64_t now = 1000 * MS;
++    CHECK(cpufreq::controlStart(c, cpufreq::kModeGovernor, 0, now));
++    uint64_t rng = 0x243f6a8885a308d3ull;
++    auto next = [&]() { rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17; return rng; };
++    unsigned windows = 0, injected = 0, slow = 0, quiet = 0, touches = 0, hints = 0;
++    for (unsigned round = 0; round < 60; round++) {
++        const unsigned length = 50 + (unsigned)(next() % 100);
++        for (unsigned w = 0; w < length; w++) {
++            if (next() % 20 == 0 && !c->retry.streak && !c->retry.sets && !c->retry.silent) {
++                Fault f;
++                f.protocol = scmi::kPerf;
++                const unsigned pick = (unsigned)(next() % 3);
++                f.message = pick == 0 ? kAnyMessage : pick == 1 ? (uint32_t)scmi::kLevelSet : (uint32_t)scmi::kLevelGet;
++                f.skip = (unsigned)(next() % 3);
++                f.times = 1 + (unsigned)(next() % 12);
++                f.kind = kStatusCode;
++                f.code = -6;
++                const unsigned kind = (unsigned)(next() % 10);
++                if (kind >= 7 && slow < 24) {
++                    slow++;
++                    f.times = 1;
++                    f.kind = kind == 7 ? kErrorBit : kind == 8 ? kWrongToken : kLate;
++                    f.lateMs = 70;
++                }
++                fake.setFaults({f});
++                injected++;
++            }
++            uint64_t busy[2], span[2];
++            loads(busy, span, (uint32_t)(next() % 101), (uint32_t)(next() % 101));
++            if (next() % 9 == 0) touches++;
++            if (next() % 3 == 0) hints++;
++            now += 20 * MS;
++            const bool backoff = now < c->retry.at;
++            const unsigned rung = fake.rung;
++            CHECK(cpufreq::controlWindow(c, now, busy, span, touches, hints) && c->on);
++            CHECK(fake.rung - rung <= 4 && (!backoff || fake.rung == rung));
++            quiet += backoff;
++            for (unsigned d = 0; d < 2; d++) CHECK(c->level[d] >= c->gov.domain[d].floor && c->level[d] <= c->gov.domain[d].top);
++            windows++;
++        }
++        fake.setFaults({});
++        for (unsigned w = 0; w < 70; w++) {
++            uint64_t busy[2], span[2];
++            loads(busy, span, (uint32_t)(next() % 101), (uint32_t)(next() % 101));
++            now += 20 * MS;
++            CHECK(cpufreq::controlWindow(c, now, busy, span, touches, hints));
++        }
++        fake.settle();
++        CHECK(c->retry.pending == 0 && c->retry.sets == 0 && c->retry.silent == 0);
++        CHECK(fake.model.requested[0] == c->level[0] && fake.model.requested[1] == c->level[1]);
++    }
++    CHECK(c->on && !logged("cpufreq: off") && injected > 100 && c->retry.busy > 100);
++    printf("ok  %u random windows with %u faults (%u of them late answers, error bits or other tokens): on throughout, no message in %u "
++           "backoff windows, at most 4 a window, levels within floor..top, the platform at the governor's levels once they stop "
++           "(busy %u, no answer %u, %u streaks, longest %u, %u checks left out)\n", windows, injected, slow, quiet, c->retry.busy,
++           c->retry.missing, c->retry.streaks, c->retry.longest, c->retry.skipped);
++}
++
+ int main()
+ {
+     testEncoding();
+@@ -1600,7 +2328,19 @@
+     testExtremes();
+     testSampling();
+     testFloorAndRow();
+-    printf("PASS: pagani-cpufreq SCMI PERF client and governor with the GPU heat caps and the screen-off policy, %u checks against a "
+-           "fake CPUCP\n", checks);
++    testRetryRules();
++    testBusyCheck();
++    testBusyBursts();
++    testBusyForever();
++    testTimeouts();
++    testStartRetry();
++    testLimitsTransient();
++    testMaxRetry();
++    testRetryRationing();
++    testCheckLeftOut();
++    testRetryRandom();
++    testNoRetry();
++    printf("PASS: pagani-cpufreq SCMI PERF client and governor with the GPU heat caps, the screen-off policy and the retries of transient "
++           "SCMI failures, %u checks against a fake CPUCP\n", checks);
+     return 0;
+ }

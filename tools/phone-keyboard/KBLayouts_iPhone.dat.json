@@ -1,0 +1,33 @@
+{
+  "base": "iPhone-PortraitChoco",
+  "family": "iPhone-PortraitChoco405",
+  "table_key": 405,
+  "width_points": 405.3333333333333,
+  "design_width": 375.0,
+  "factor": 1.0808888888888888,
+  "scale": 3.0,
+  "keyboards": 680,
+  "keyboard_objects": 632,
+  "appended_bytes": 631096,
+  "input_bytes": 2347928,
+  "output_bytes": 3021509,
+  "selection": {
+    "320": "iPhone-Portrait",
+    "375": "iPhone-PortraitChoco",
+    "390": "iPhone-PortraitChoco",
+    "393": "iPhone-PortraitChoco",
+    "400": "iPhone-PortraitChoco",
+    "405.3333333333333": "iPhone-PortraitChoco405",
+    "410": "iPhone-PortraitChoco405",
+    "414": "iPhone-PortraitTruffle",
+    "428": "iPhone-PortraitTruffle",
+    "430": "iPhone-PortraitTruffle",
+    "768": "Wildcat-Portrait"
+  },
+  "landscape_880": "iPhone-LandscapeTruffle",
+  "new_keyboards": 680,
+  "input": "/Users/xiaochoumao/unixnu-13t/build-userspace/iphone-17.7-21H16/KBLayouts_iPhone.dat",
+  "input_sha256": "3801e40460ed4fddfa34e6176472b83141be841a106b4c313ec41e4d380749f2",
+  "output": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/phone-keyboard/KBLayouts_iPhone.dat",
+  "output_sha256": "5d106d843432bb4c8f71ea5a36247f4e26b43a1eeedd1c7bfa52436b45026dd2"
+}

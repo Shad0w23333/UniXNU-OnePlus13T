@@ -1,0 +1,52 @@
+{
+  "base": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island.dbrdisk",
+  "base_bytes": 2147483648,
+  "base_sha256": "cb402100ec6844693af315ca06e48d1a4fe7aee23d1e6a7923c10f1ff6b2fbc0",
+  "plugin": {
+    "path": "/private/var/ngpu/audio/PaganiAudio.driver",
+    "cdhash": "57a283d0817386b0cfc9ea824fbc8411d57aaeca",
+    "identifier": "org.unixnu.pagani.audio",
+    "page_size": 4096,
+    "factory": "A2DED124-FF38-44E4-B352-70AF95CDBDAD",
+    "factory_function": "PaganiAudio_Create",
+    "executable_sha256": "73925ccd8405b618c92538a3abe740d299b781461f397a9e3961181bb678f7c9",
+    "source_sha256": "1a8ff8e2f80fb48b7efd5462715f2170bd5d983a26af5c4704040fb56ea31073",
+    "abi_sha256": "3d42e833912ab14c01a02101dd65bbaf04193736edcbaf9faf3144b95645a864"
+  },
+  "files": [
+    "PaganiAudio.driver/Info.plist",
+    "PaganiAudio.driver/PaganiAudio",
+    "PaganiAudio.driver/_CodeSignature/CodeResources"
+  ],
+  "used_kib": 42688,
+  "available_kib": 2046224,
+  "output": {
+    "bytes": 2147483648,
+    "sha256": "5ab5d60c72c560ffc6fbb873330deadd1bbfbf7e50a1a468f80043f44b3886ff",
+    "encoded_bytes": 44274976,
+    "encoded_sha256": "0d50943d0358751fd42b160f5a02d55a4348ec08fba2fde46a2a33dfb7167759",
+    "packed": true
+  },
+  "trust": {
+    "output": "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-audio-owner-trust.bundle",
+    "base": "/Users/xiaochoumao/unixnu-13t/build-userspace/tree/build/adreno-metal-plugin/owner-trust.bundle",
+    "base_sha256": "eaf328a8db17379f93885ecbfce94138be229258670fc6d8bcdf288a33807f68",
+    "already_present": false,
+    "owner_hashes": [
+      "2b12ec65b01927887c47fbb933c3c2b346f410cc",
+      "57a283d0817386b0cfc9ea824fbc8411d57aaeca",
+      "d49736008ff8d695d2c571724d6c12a3f8492abd",
+      "e27481d259fab377720adf7b5c89463ac6624634"
+    ],
+    "apple_modules_unchanged": true,
+    "sha256": "55404a15b0dcadc391e682d71dada5ffd87ef3a09aa4e78a2df5994ebbdfaf56"
+  },
+  "image_arguments": [
+    "--data-ramdisk",
+    "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-audio.dbrdisk",
+    "--owner-trust-cache",
+    "/Users/xiaochoumao/unixnu-13t/\u5de5\u5177/seeds/phone-island-audio-owner-trust.bundle",
+    "--kernel-arg",
+    "pagani-audio=1"
+  ]
+}

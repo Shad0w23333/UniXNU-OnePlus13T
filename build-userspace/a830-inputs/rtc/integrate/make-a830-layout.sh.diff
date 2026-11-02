@@ -1,0 +1,35 @@
+--- a/工具/make-a830-layout.sh
++++ b/工具/make-a830-layout.sh
+@@ -28,6 +28,8 @@
+ # A830_OWNER_TRUST=<bundle> replaces build/adreno-metal-plugin/owner-trust.bundle, for the image and as the base of A830_AUDIO's bundle
+ # (a plugin built elsewhere, next2/metal-for-apps: its bundle trusts the old plugin and the new one). A830_EXTRA_ARGS="arg ..." appends
+ # kernel arguments (e.g. pagani-gpu-va=16) to the phone-plus/phone-apps forms.
++# Every variant carries the time of this build as /chosen/pagani-build-time (Unix seconds, u32; A830_BUILD_TIME=<seconds> replaces it):
++# PaganiArmDTPlatform's calendar starts there with boot-arg pagani-rtc=1 and no pagani-rtc-offset, and it is read only then.
+ # A830_DIAG=<dir> adds the PaganiDiag daemon (UniXNU-Pagani-Drivers drivers/PaganiDiag, scripts/build-paganidiag.py output) to the
+ # phone-plus/phone-apps seed (make-phone-seed.py --diag-daemon); the owner trust bundle must carry its CDHash (A830_OWNER_TRUST=
+ # <dir>/owner-trust-apps-diag.bundle from scripts/make-diag-trust.py; checked below). The kernel needs phone-diag-sysctl.patch, which
+@@ -171,10 +173,13 @@
+ KEEP=$(mktemp)
+ cp "$BOARD" "$KEEP"
+ trap 'cp "$KEEP" "$BOARD"; rm -f "$KEEP"' EXIT
+-python3 - "$BOARD" "$VARIANT" "${A830_TARGET_TYPE:-}" "$ISLAND" "${A830_CORNER_RADIUS:-}" "$CI_FIXUP" "$OS_PROFILE" "$ISLAND_FIXUP" "$KEYBOARD_FIXUP" <<'EOF'
++python3 - "$BOARD" "$VARIANT" "${A830_TARGET_TYPE:-}" "$ISLAND" "${A830_CORNER_RADIUS:-}" "$CI_FIXUP" "$OS_PROFILE" "$ISLAND_FIXUP" "$KEYBOARD_FIXUP" "${A830_BUILD_TIME:-$(date +%s)}" <<'EOF'
+ import sys, tomllib
+ path, variant, target_override, island, corner = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4] == '1', sys.argv[5]
+ ci_fixup, os_profile, island_fixup, keyboard_fixup = sys.argv[6], sys.argv[7], sys.argv[8], sys.argv[9]
++build_time = int(sys.argv[10])
++if not 0 < build_time < 1 << 32:
++    sys.exit(f'make-a830-layout: A830_BUILD_TIME={build_time} is out of range')
+ phone = variant != 'scale3'
+ # SpringBoard (-[SpringBoard _completeStartupAfterMainSceneConnect:]), SpringBoardUIServices (SBUIIsSystemApertureEnabled) and
+ # SpringBoardServices (SBSIsSystemApertureAvailable) turn the Dynamic Island on when MobileGestalt's ArtworkTraits
+@@ -189,7 +194,7 @@
+         sys.exit(f'make-a830-layout: expected one {old!r} in board.toml')
+     s = s.replace(old, new, 1)
+ # @3x: 1216x2640 pixels become 405x880 points, the size class of a large iPhone.
+-sub('[adt.chosen.u32]\ndisplay-scale = 2\n', '[adt.chosen.u32]\ndisplay-scale = 3\n')
++sub('[adt.chosen.u32]\ndisplay-scale = 2\n', f'[adt.chosen.u32]\ndisplay-scale = 3\npagani-build-time = {build_time}\n')
+ sub('[adt.product.u32]\nthin-bezel = 1\n', '[adt.product.u32]\nthin-bezel = 1\nartwork-scale-factor = 3\n'
+     + (f'artwork-device-subtype = {subtype}\n' if phone else ''))
+ if phone:

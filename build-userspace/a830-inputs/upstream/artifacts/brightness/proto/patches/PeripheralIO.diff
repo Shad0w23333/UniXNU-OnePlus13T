@@ -1,0 +1,126 @@
+--- kits/Sm8750Platform/PeripheralIO.h	2026-10-31 17:34:54
++++ ../new/kits/Sm8750Platform/PeripheralIO.h	2026-10-31 17:38:03
+@@ -143,49 +143,33 @@
+     *hz=best;*select=index;return 0;
+ }
+ 
+-// Only DCS display on/off and 16-bit brightness; preserve the firmware's scanout setup.
+-static inline int dsi_panel_command(const struct peripheral_io *io,uint8_t command,unsigned level) {
+-    if ((command!=0x51 && command!=0x28 && command!=0x29) || level>0xffff) return -22;
+-    if (!(peripheral_read(io,4)&1) || peripheral_read(io,0x15c)) return -19;
+-    unsigned n;
+-    for (n=0;n<2000 && (peripheral_read(io,8)&6);++n) io->delay(io->context,10);
+-    if (n==2000) return -16;
+-    uint32_t dma=peripheral_read(io,0x3c),dma1=peripheral_read(io,0x390),length=peripheral_read(io,0x4c);
+-    // Status bits are W1C; keep interrupt enables without acknowledging other clients.
+-    const uint32_t enable_mask=0xa222aa02;
+-    uint32_t enables=peripheral_read(io,0x110)&enable_mask;
++// One DCS write packet through the controller's command FIFO: type 0x05 (short, no parameter: length 1), 0x15 (short, one parameter:
++// length 2) or 0x39 (long, 1 to DSI_PANEL_PACKET_MAX bytes). The FIFO words follow dsi_ctrl.c/dsi_ctrl_hw_cmn.c: the header word holds the
++// last-command flag (bit 31), the long-packet flag (bit 30), the data type and the word count (long) or the two data bytes (short); the
++// payload follows little-endian, padded with 0xff to a word; an odd word count gets a zero word. The firmware's scanout setup stays.
++// mode: high speed unless DSI_PANEL_LP (the DT's dsi_hs_mode/dsi_lp_mode for that command set: brightness and display off are high speed,
++// the on sequence low power); DSI_PANEL_FORCE skips the checks of the enable bit, the test-pattern FIFO and the MDP stream (for a handoff
++// that reads otherwise than the sibling boards': whether the engine answers then decides).
++// Returns 0, -22 bad argument, -19 not sent (enable bit clear, or the test-pattern FIFO in use), -16 the engine stayed busy for 20 ms
++// (nothing written), -110 no DMA done in 50 ms: the command stays the engine's and nothing is restored, except with DSI_PANEL_FORCE when
++// the DMA engine does not report busy (it never took the command).
++#define DSI_PANEL_PACKET_MAX 16
++#define DSI_PANEL_LP 1u
++#define DSI_PANEL_FORCE 2u
++static inline void dsi_panel_restore(const struct peripheral_io *io,uint32_t enables,uint32_t dma,uint32_t dma1,uint32_t length) {
+     peripheral_write(io,0x110,enables|1);
+-    peripheral_write(io,0x15c,0x30006);
+-    uint32_t header=command==0x51?0xc0390003:0x80050000u|command;
+-    peripheral_write(io,0x17c,header);
+-    peripheral_write(io,0x17c,command==0x51?0xff000051u|((level&255)<<8)|((level>>8)<<16):0);
+-    peripheral_write(io,0x3c,(dma&~0xc0000000u)|0x14000000);
+-    peripheral_write(io,0x390,dma1&~2u);
+-    peripheral_write(io,0x4c,command==0x51?8:4);
+-    peripheral_write(io,0x90,1);
+-    for (n=0;n<5000 && !(peripheral_read(io,0x110)&1);++n) io->delay(io->context,10);
+-    // Do not reset a command still owned by the engine on timeout. Caller disables further requests.
+-    if (n==5000) return -110;
+-    peripheral_write(io,0x110,enables|1);
+     peripheral_write(io,0x15c,0);
+     peripheral_write(io,0x1ec,1);io->delay(io->context,1);peripheral_write(io,0x1ec,0);
+     peripheral_write(io,0x3c,dma);peripheral_write(io,0x390,dma1);peripheral_write(io,0x4c,length);
+-    return 0;
+ }
+-
+-// One DCS write packet of a panel power sequence through the same command FIFO, engine checks and register restore as
+-// dsi_panel_command: type 0x05 (short, no parameter: length 1), 0x15 (short, one parameter: length 2) or 0x39 (long, 1 to
+-// DSI_PANEL_PACKET_MAX bytes). The FIFO words follow dsi_ctrl.c/dsi_ctrl_hw_cmn.c: the header word holds the last-command flag
+-// (bit 31), the long-packet flag (bit 30), the data type and the word count (long) or the two data bytes (short); the payload
+-// follows little-endian, padded with 0xff to a word; an odd word count gets a zero word. 0x28 (0x05) and 0x51 (0x39, three bytes)
+-// write exactly what dsi_panel_command writes.
+-#define DSI_PANEL_PACKET_MAX 16
+-static inline int dsi_panel_packet(const struct peripheral_io *io,uint8_t type,const uint8_t *payload,unsigned length) {
++static inline int dsi_panel_packet_mode(const struct peripheral_io *io,uint8_t type,const uint8_t *payload,unsigned length,unsigned mode) {
+     if (!payload || (type==0x05 && length!=1) || (type==0x15 && length!=2) ||
+         (type==0x39 && (!length || length>DSI_PANEL_PACKET_MAX)) || (type!=0x05 && type!=0x15 && type!=0x39)) return -22;
+-    if (!(peripheral_read(io,4)&1) || peripheral_read(io,0x15c)) return -19;
++    if (!(mode&DSI_PANEL_FORCE) && (!(peripheral_read(io,4)&1) || peripheral_read(io,0x15c))) return -19;
++    // Busy: the command DMA, and the MDP stream too (the gap between two frames) unless forced: the hardware arbitrates them, as on Android.
++    const uint32_t busy=(mode&DSI_PANEL_FORCE)?2:6;
+     unsigned n;
+-    for (n=0;n<2000 && (peripheral_read(io,8)&6);++n) io->delay(io->context,10);
++    for (n=0;n<2000 && (peripheral_read(io,8)&busy);++n) io->delay(io->context,10);
+     if (n==2000) return -16;
+     uint32_t words[2+DSI_PANEL_PACKET_MAX/4];
+     unsigned count=0;
+@@ -202,20 +186,48 @@
+     const uint32_t bytes=4*count;
+     if (count&1) words[count++]=0;
+     uint32_t dma=peripheral_read(io,0x3c),dma1=peripheral_read(io,0x390),saved=peripheral_read(io,0x4c);
++    // Status bits are W1C; keep interrupt enables without acknowledging other clients.
+     const uint32_t enable_mask=0xa222aa02;
+     uint32_t enables=peripheral_read(io,0x110)&enable_mask;
+     peripheral_write(io,0x110,enables|1);
+     peripheral_write(io,0x15c,0x30006);
+     for (unsigned i=0;i<count;++i) peripheral_write(io,0x17c,words[i]);
+-    peripheral_write(io,0x3c,(dma&~0xc0000000u)|0x14000000);
++    peripheral_write(io,0x3c,(dma&~0xc4000000u)|0x10000000u|((mode&DSI_PANEL_LP)?0x04000000u:0));
+     peripheral_write(io,0x390,dma1&~2u);
+     peripheral_write(io,0x4c,bytes);
+     peripheral_write(io,0x90,1);
+     for (n=0;n<5000 && !(peripheral_read(io,0x110)&1);++n) io->delay(io->context,10);
+-    if (n==5000) return -110;
+-    peripheral_write(io,0x110,enables|1);
+-    peripheral_write(io,0x15c,0);
+-    peripheral_write(io,0x1ec,1);io->delay(io->context,1);peripheral_write(io,0x1ec,0);
+-    peripheral_write(io,0x3c,dma);peripheral_write(io,0x390,dma1);peripheral_write(io,0x4c,saved);
++    // Do not reset a command still owned by the engine on timeout. Caller disables further requests.
++    if (n==5000) {
++        if ((mode&DSI_PANEL_FORCE) && !(peripheral_read(io,8)&2)) dsi_panel_restore(io,enables,dma,dma1,saved);
++        return -110;
++    }
++    dsi_panel_restore(io,enables,dma,dma1,saved);
+     return 0;
+ }
++// The packet writer as the panel's power sequences use it: low power, the DT's state of the on sequence.
++static inline int dsi_panel_packet(const struct peripheral_io *io,uint8_t type,const uint8_t *payload,unsigned length) {
++    return dsi_panel_packet_mode(io,type,payload,length,DSI_PANEL_LP);
++}
++// DCS display on/off and 16-bit brightness, high speed. Brightness goes out high byte first (0x51, high, low): the panel's DT
++// (qcom,mdss-dsi-bl-inverted-dbv, its 51 0d bb hbm-off table) and the vendor's UEFI Panel_Default_Brightness_Level say so.
++static inline int dsi_panel_command_mode(const struct peripheral_io *io,uint8_t command,unsigned level,unsigned mode) {
++    if ((command!=0x51 && command!=0x28 && command!=0x29) || level>0xffff) return -22;
++    if (command==0x51) {
++        const uint8_t payload[3]={0x51,(uint8_t)(level>>8),(uint8_t)level};
++        return dsi_panel_packet_mode(io,0x39,payload,3,mode);
++    }
++    return dsi_panel_packet_mode(io,0x05,&command,1,mode);
++}
++static inline int dsi_panel_command(const struct peripheral_io *io,uint8_t command,unsigned level) {
++    return dsi_panel_command_mode(io,command,level,0);
++}
++// What the controller was left in, read only (the zorn port read the same offsets on SM8650 under Gunyah).
++struct dsi_panel_state {uint32_t version,ctrl,status,fifo,dma,trigger,lanes,ints,clocks,tpg,ack,timeout,secure,split;};
++static inline void dsi_panel_snapshot(const struct peripheral_io *io,struct dsi_panel_state *s) {
++    s->version=peripheral_read(io,0x000);s->ctrl=peripheral_read(io,0x004);s->status=peripheral_read(io,0x008);
++    s->fifo=peripheral_read(io,0x00c);s->dma=peripheral_read(io,0x03c);s->trigger=peripheral_read(io,0x084);
++    s->lanes=peripheral_read(io,0x0a8);s->ints=peripheral_read(io,0x110);s->clocks=peripheral_read(io,0x11c);
++    s->tpg=peripheral_read(io,0x15c);s->ack=peripheral_read(io,0x068);s->timeout=peripheral_read(io,0x0c0);
++    s->secure=peripheral_read(io,0x2cc);s->split=peripheral_read(io,0x330);
++}

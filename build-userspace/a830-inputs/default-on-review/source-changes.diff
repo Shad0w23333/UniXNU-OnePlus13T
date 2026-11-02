@@ -1,0 +1,92 @@
+diff -ruN a/UniXNU/drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm b/UniXNU/drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm
+--- a/UniXNU/drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm	2026-10-31 11:00:50
++++ b/UniXNU/drivers/AdrenoMetal/NativeBridgeMetalFrontend.mm	2026-10-31 11:00:50
+@@ -1169,6 +1169,12 @@
+   }
+  }
+  auto attachment=[&](MTLRenderPassAttachmentDescriptor *a,NmbPassAttachment &out)->bool {
++  // An attachment without a texture is unused, a resolve texture left on it too: Metal ignores it, the runtime would refuse the whole pass.
++  if(!a.texture)return true;
++  if(![(id)a.texture isKindOfClass:[NBTexture class]])return false;
++  NBTexture *texture=(NBTexture *)a.texture;if(texture.surface){[_surfaces addObject:texture];[_writtenSurfaces addObject:texture];}
++  [_resourceOwners addObject:texture];
++  out.texture=texture.handle;out.level=a.level;out.slice=a.slice;out.depth_plane=a.depthPlane;out.load=a.loadAction;out.store=a.storeAction;
+   // The resolve texture a resolving store action writes (2026-10-31: it was dropped, so a multisampled pass stored with MultisampleResolve
+   // left its single-sample target as it was). It is written like the attachment itself, so a surface behind it is maintained the same way.
+   if(id resolve=a.resolveTexture) {
+@@ -1177,11 +1183,6 @@
+    [_resourceOwners addObject:target];
+    out.resolve=target.handle;out.resolve_level=a.resolveLevel;out.resolve_slice=a.resolveSlice;out.resolve_depth_plane=a.resolveDepthPlane;
+   }
+-  if(!a.texture)return true;
+-  if(![(id)a.texture isKindOfClass:[NBTexture class]])return false;
+-  NBTexture *texture=(NBTexture *)a.texture;if(texture.surface){[_surfaces addObject:texture];[_writtenSurfaces addObject:texture];}
+-  [_resourceOwners addObject:texture];
+-  out.texture=texture.handle;out.level=a.level;out.slice=a.slice;out.depth_plane=a.depthPlane;out.load=a.loadAction;out.store=a.storeAction;
+   return true;
+  };
+  for(unsigned i=0;i<8;i++) {
+diff -ruN a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp
+--- a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp	2026-10-31 11:00:50
++++ b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/NativeKeyStoreEvents.cpp	2026-10-31 11:00:50
+@@ -291,11 +291,14 @@
+     if (args->structureOutputDescriptor) return args->structureOutputDescriptor->getLength();
+     return args->structureOutput ? args->structureOutputSize : 0;
+ }
++// prepare() wires the caller's whole buffer, whose size the caller picks (up to 4 GiB): no answer here comes near this, libaks hands 32 KiB.
++constexpr size_t kOutOfLineMax = 1u << 20;
+ // The struct output, inline (at most 4096 bytes asked) or through the caller's out-of-line descriptor, which must be prepared
+ // (wired) before writeBytes touches it: writing an unprepared user descriptor panics (IOGMD: not wired).
+ IOReturn writeOutput(IOExternalMethodArguments *args, const void *data, size_t n) {
+     if (IOMemoryDescriptor *md = args->structureOutputDescriptor) {
+         if (n > md->getLength()) return kAksNoSpace;
++        if (md->getLength() > kOutOfLineMax) return kAksBadArgument;
+         IOReturn rc = md->prepare();
+         if (rc != kIOReturnSuccess) return rc;
+         const IOByteCount written = md->writeBytes(0, data, n);
+diff -ruN a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/README.md b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/README.md
+--- a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/README.md	2026-10-31 11:00:50
++++ b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/README.md	2026-10-31 11:00:50
+@@ -38,7 +38,7 @@
+ - Bags: 0 (device), -3 (MobileKeyBag's session alias) and -6 (securityd's system keychain handle) name the one keybag.
+ - Sizes: keys of 16..512 bytes in steps of 8; anything else `kIOReturnBadArgument`. Outputs too small: `kIOReturnNoSpace`.
+ - Out-of-line outputs (callers asking for more than 4096 bytes, e.g. the 32 KiB configuration buffer) are prepared before they are
+-  written and completed after.
++  written and completed after; one larger than 1 MiB is refused (`kIOReturnBadArgument`) before anything is wired.
+ - Ramoops: failures as Stage7Probe's R lines (`key operation unavailable` with the selector) and, once per kind, U lines
+   `keybag: ...` (mode, keys up, first wrap/unwrap with the process, refusals with process/bag/class/sizes, usage at 64/1024/16384).
+ 
+diff -ruN a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/boundary.cpp b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/boundary.cpp
+--- a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/boundary.cpp	2026-10-31 11:00:50
++++ b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/boundary.cpp	2026-10-31 11:00:50
+@@ -63,6 +63,8 @@
+             CHECK(d.rc == kIOReturnSuccess && d.out == r.out && descriptor.prepares == 1 && descriptor.completes == 1 && !descriptor.prepared);
+             IOMemoryDescriptor tiny; tiny.length = 10;
+             CHECK(call(client, sel, {0}, {}, 0, 0, &tiny).rc == kIOReturnNoSpace && !tiny.prepares);
++            IOMemoryDescriptor huge; huge.length = (1u << 20) + 1;     // never wired, however little goes into it
++            CHECK(call(client, sel, {0}, {}, 0, 0, &huge).rc == kIOReturnBadArgument && !huge.prepares);
+             IOMemoryDescriptor unwired; unwired.prepareResult = kIOReturnVMError;
+             CHECK(call(client, sel, {0}, {}, 0, 0, &unwired).rc == kIOReturnVMError && !unwired.completes);
+             CHECK(call(client, sel, {}, {}, 0, 0x1000).rc == kIOReturnSuccess);
+diff -ruN a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/keybag.cpp b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/keybag.cpp
+--- a/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/keybag.cpp	2026-10-31 11:00:50
++++ b/UniXNU-Pagani-Drivers/drivers/NativeKeyStoreEvents/Test/keybag.cpp	2026-10-31 11:00:50
+@@ -174,6 +174,9 @@
+     CHECK(call(s.client, 10, {0, 6}, key, 1, 0, &small).rc == kIOReturnNoSpace && !small.prepares);
+     IOMemoryDescriptor unwired; unwired.prepareResult = kIOReturnVMError;
+     CHECK(call(s.client, 10, {0, 6}, key, 1, 0, &unwired).rc == kIOReturnVMError && !unwired.completes);
++    // An out-of-line output past 1 MiB is not wired: prepare() would wire all of it, however little is written.
++    IOMemoryDescriptor huge; huge.length = (1u << 20) + 1;
++    CHECK(call(s.client, 10, {0, 6}, key, 1, 0, &huge).rc == kIOReturnBadArgument && !huge.prepares);
+     // Blobs that cannot be a wrapped key, tampered ones, truncated and extended ones: the decode error (securityd drops the item).
+     // No blob at all is an argument error.
+     CHECK(call(s.client, 11, {0, 6}, {}, 0, 600).rc == kIOReturnBadArgument);
+@@ -233,6 +236,8 @@
+     Result inl = call(s.client, 31, {0}, {}, 0, 4096);
+     CHECK(inl.rc == kIOReturnSuccess && inl.out.size() > 10);
+     CHECK(call(s.client, 31, {0}, {}, 0, 4).rc == kIOReturnNoSpace);
++    IOMemoryDescriptor top; top.length = 1u << 20;            // the largest output buffer it still wires
++    CHECK(call(s.client, 31, {0}, {}, 0, 0, &top).rc == kIOReturnSuccess && top.prepares == 1 && top.completes == 1);
+     CHECK(call(s.client, 31, {}, {}, 0, 4096).rc == kIOReturnBadArgument);
+     CHECK(call(s.client, 31, {0, 0}, {}, 0, 4096).rc == kIOReturnBadArgument);
+     CHECK(call(s.client, 31, {i32(-1)}, {}, 0, 4096).rc == kIOReturnNotFound);   // e.g. AKSIdentityCopyGroupUUID's negated identity

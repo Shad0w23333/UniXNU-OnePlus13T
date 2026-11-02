@@ -1,0 +1,263 @@
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/KeyStoreProbe.cpp b/KeyStoreProbe.cpp
+--- a/KeyStoreProbe.cpp	1969-12-31 16:00:00
++++ b/KeyStoreProbe.cpp	2026-11-01 12:30:58
+@@ -0,0 +1,85 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// Ported from UniXNU-sheng package/KeyStoreProbe.cpp (6b11bb5e40aabc75545a3dac87a92dbfde52c806), Copyright (c) 2026, UniXNU contributors, with
++// the start logic of this project's Stage7Probe (startKeyState).
++// Starts NativeKeyStoreEvents on a kernel without the display stack, whose late probe starts it otherwise: SourceStorage.cpp calls it. A kernel
++// that links Stage7Probe already has these hooks and must not link this file.
++#include <IOKit/IOService.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <libkern/c++/OSData.h>
++#include <libkern/c++/OSSymbol.h>
++#include <pexpert/pexpert.h>
++#include <mach/kmod.h>
++
++extern kmod_info_t g_kernel_kmod_info;
++extern "C" void native_keyevents_static_init(void) __asm__("__GLOBAL__sub_I_NativeKeyStoreEvents.cpp");
++extern "C" IOService *native_keyevents_allocate(void);
++extern "C" void boot_progress_trace(const char *text);    // BootProgress: one U line in the ramoops log
++
++static bool stateEnabled, storageVolatile, attempted;
++static uint32_t aksOpens, aksCalls;
++
++static void note(const char *what, uint64_t value)
++{
++    char line[80];
++    snprintf(line, sizeof(line), "keystore: %s %llx", what, value);
++    boot_progress_trace(line);
++}
++
++static bool enabled(const char *name)
++{
++    unsigned value = 0;
++    return PE_parse_boot_argn(name, &value, sizeof(value)) && value == 1;
++}
++
++// `/chosen ephemeral-storage` = 1: the Data volume is a RAM disk made from the seed every boot.
++static bool ephemeralStorage(void)
++{
++    // An explicit plane requires a path without a second plane prefix.
++    IORegistryEntry *chosen = IORegistryEntry::fromPath("/chosen", gIODTPlane);
++    OSData *data = chosen ? OSDynamicCast(OSData, chosen->getProperty("ephemeral-storage")) : nullptr;
++    uint32_t ephemeral = 0;
++    if (data && data->getLength() == sizeof(ephemeral)) memcpy(&ephemeral, data->getBytesNoCopy(), sizeof(ephemeral));
++    OSSafeReleaseNULL(chosen);
++    return ephemeral == 1;
++}
++
++extern "C" {
++void native_keyevents_open_refused(void) { note("open refused", 0); }
++bool native_aks_state_enabled(void) { return stateEnabled; }
++bool native_aks_storage_volatile(void) { return storageVolatile; }
++uint32_t native_aks_lock_state(void) { return 0; }
++void native_aks_call(uint32_t selector, int32_t result)
++{
++    aksCalls = aksCalls + 1;
++    if (result) note("operation unavailable", selector);
++}
++void native_aks_opened(void) { aksOpens = aksOpens + 1; }
++
++void native_keystore_probe(void)
++{
++    if (attempted || !enabled("offline-key-events") || !enabled("sheng-aks")) return;
++    attempted = true;
++    // A persistent Data store still has no SEP, so the service stays for it (sheng's change), but not the volatile keybag: per-boot class keys
++    // would make every keychain item of an earlier boot undecryptable, and securityd then drops them. AppleKeyStore::start reads this.
++    storageVolatile = ephemeralStorage();
++    const OSSymbol *name = OSSymbol::withCString("AppleKeyStore");
++    const bool absent = name && !OSMetaClass::getMetaClassWithName(name);
++    OSSafeReleaseNULL(name);
++    IOService *provider = IOService::getResourceService();
++    if (!absent || !provider) { note("not started: class present or no provider", absent); return; }
++    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
++    if (!handle) { note("class registration refused", 0); return; }
++    native_keyevents_static_init();
++    const OSReturn status = OSMetaClass::postModLoad(handle);
++    if (status != kOSReturnSuccess) { note("class registration failed", static_cast<uint32_t>(status)); return; }
++    IOService *service = native_keyevents_allocate();
++    const bool attached = service && service->init() && service->attach(provider);
++    // Publish state queries only after the guards above passed.
++    stateEnabled = true;
++    if (attached && service->start(provider)) { note("started, volatile storage", storageVolatile); return; }
++    stateEnabled = false;
++    if (attached) service->detach(provider);
++    OSSafeReleaseNULL(service);
++    note("start failed", 0);
++}
++}
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/LICENSE.UniXNU-sheng b/LICENSE.UniXNU-sheng
+--- a/LICENSE.UniXNU-sheng	1969-12-31 16:00:00
++++ b/LICENSE.UniXNU-sheng	2026-11-01 12:44:38
+@@ -0,0 +1,51 @@
++Copyright (c) 2026, UniXNU contributors. All rights reserved.
++
++SPDX-License-Identifier: BSD-2-Clause-Patent
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++1. Redistributions of source code must retain the above copyright notice,
++   this list of conditions and the following disclaimer.
++
++2. Redistributions in binary form must reproduce the above copyright notice,
++   this list of conditions and the following disclaimer in the documentation
++   and/or other materials provided with the distribution.
++
++Subject to the terms and conditions of this license, each copyright holder
++and contributor hereby grants to those receiving rights under this license
++a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++(except for failure to satisfy the conditions of this license) patent
++license to make, have made, use, offer to sell, sell, import, and otherwise
++transfer this software, where such license applies only to those patent
++claims, already acquired or hereafter acquired, licensable by such copyright
++holder or contributor that are necessarily infringed by:
++
++(a) their Contribution(s) (the licensed copyrights of copyright holders and
++    non-copyrightable additions of contributors, in source or binary form)
++    alone; or
++
++(b) combination of their Contribution(s) with the work of authorship to
++    which such Contribution(s) was added by such copyright holder or
++    contributor, if, at the time the Contribution is added, such addition
++    causes such combination to be necessarily infringed. The patent license
++    shall not apply to any other combinations which include the
++    Contribution.
++
++Except as expressly stated above, no rights or licenses from any copyright
++holder or contributor is granted under this license, whether expressly, by
++implication, estoppel or otherwise.
++
++DISCLAIMER
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
++LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++POSSIBILITY OF SUCH DAMAGE.
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/NativeKeyStoreEvents.cpp b/NativeKeyStoreEvents.cpp
+--- a/NativeKeyStoreEvents.cpp	2026-10-31 10:55:17
++++ b/NativeKeyStoreEvents.cpp	2026-11-01 12:30:58
+@@ -2,9 +2,10 @@
+ // AppleKeyStore for an ephemeral offline fixture: a notification service (the public IOKit matching class used by
+ // MKBEventsRegister) and, only when sheng-aks=1 is set, a user client that answers the unchanged libaks/MobileKeyBag truthfully
+ // for this environment: no passcode, nothing locked, and (pagani-keybag, default 1) a volatile software keybag whose class keys
+-// come from the kernel random generator at their first use in each boot. Stage7Probe starts this service only on volatile storage
+-// (/chosen ephemeral-storage = 1: the Data volume is a RAM disk made from the seed every boot), which is what makes per-boot keys
+-// enough: nothing wrapped in one boot is read in the next. It is not secure storage: no passcode, no hardware-bound key, nothing
++// come from the kernel random generator at their first use in each boot. The keybag runs only on volatile storage (/chosen
++// ephemeral-storage = 1: the Data volume is a RAM disk made from the seed every boot; native_aks_storage_volatile), which is what makes
++// per-boot keys enough: nothing wrapped in one boot is read in the next. On a persistent Data store the service gives the state
++// answers alone. It is not secure storage: no passcode, no hardware-bound key, nothing
+ // that protects data from anyone who can run code in the kernel or read the RAM (the RAM disk holds all data in the clear anyway).
+ //
+ // Answers (selectors and layouts read from the unchanged target's libaks/MobileKeyBag, see docs/touch-nt36532e.md; the set that is
+@@ -53,6 +54,7 @@
+ #include <kern/task.h>
+ extern "C" void native_keyevents_open_refused(void);
+ extern "C" bool native_aks_state_enabled(void);
++extern "C" bool native_aks_storage_volatile(void);
+ extern "C" uint32_t native_aks_lock_state(void);
+ extern "C" void native_aks_call(uint32_t selector, int32_t result);
+ extern "C" void native_aks_opened(void);
+@@ -526,6 +528,7 @@
+         uint32_t mode = 1;
+         if (!PE_parse_boot_argn("pagani-keybag", &mode, sizeof mode)) mode = 1;
+         if (mode > 2) mode = 1;
++        if (mode && !native_aks_storage_volatile()) { note(kNoteFailed, "keybag: off: persistent Data storage"); mode = 0; }
+         if (mode && !gKeybag.lock) gKeybag.lock = IOLockAlloc();
+         if (mode && !gKeybag.lock) { note(kNoteFailed, "keybag: off: no lock"); mode = 0; }
+         __atomic_store_n(&gKeybag.mode, mode, __ATOMIC_RELAXED);
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/README.md b/README.md
+--- a/README.md	2026-10-31 10:55:17
++++ b/README.md	2026-11-01 12:30:58
+@@ -3,8 +3,10 @@
+ AppleKeyStore state client and volatile software keybag. Handles keybag and lock-state events for the sheng port and, on the 13T,
+ the keychain's key wrapping.
+ 
+-Current state: used with `sheng-aks=1` (and `offline-key-events=1`); Stage7Probe registers it only when `/chosen ephemeral-storage`
+-is 1, i.e. the Data volume is a RAM disk made fresh from the seed every boot.
++Current state: used with `sheng-aks=1` (and `offline-key-events=1`). On the iPadOS 27 path `KeyStoreProbe.cpp`, called from
++`SourceStorage.cpp`, starts it where the iPadOS 17 path has Stage7Probe (no display stack yet; the two are not linked together). The
++service also runs on a persistent Data store, which has no SEP either; the volatile keybag only when `/chosen ephemeral-storage` is 1,
++i.e. the Data volume is a RAM disk made fresh from the seed every boot.
+ 
+ Linked into XNU by `unixnu build kernel` (compiled by `scripts/build-stage7-driver.py NativeKeyStoreEvents` into the Stage 7
+ display archive).
+@@ -27,7 +29,7 @@
+ 
+ ## Volatile keybag (`pagani-keybag`)
+ 
+-- `pagani-keybag` absent or 1: on. `0`: off (the table above without 8/10/11/31/32, exactly the behaviour before the keybag).
++- `pagani-keybag` absent or 1: on, on volatile storage. `0`, or persistent Data storage: off (the table above without 8/10/11/31/32, exactly the behaviour before the keybag).
+   `2`: on, and the keychain classes 6-12 also need the caller's `com.apple.keystore.access-keychain-keys` entitlement (securityd has
+   it); not yet tried on hardware.
+ - Keys: one 256-bit key per class with a key, drawn from `read_random` (the kernel PRNG) at the first wrap/unwrap of the boot, after
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/boundary.cpp b/Test/boundary.cpp
+--- a/Test/boundary.cpp	2026-10-31 10:55:17
++++ b/Test/boundary.cpp	2026-11-01 12:31:12
+@@ -30,8 +30,9 @@
+     static_cast<OSObject *>(device)->release();
+ }
+ 
+-static void stateAnswers(long bootArg) {
++static void stateAnswers(long bootArg, bool volatileStorage = true) {
+     freshBoot();
++    storageVolatile = volatileStorage;
+     opened = 0;
+     Service s(bootArg);
+     IOUserClient *client = s.client;
+@@ -80,14 +81,16 @@
+         r = call(client, sel, {0, 6}, bytes(32, 1), 1, 64);
+         if (handshake.count(sel)) CHECK(r.rc == kIOReturnSuccess);
+         else if (state.count(sel)) CHECK(r.rc != kIOReturnUnsupported);
+-        else if (keybag.count(sel)) CHECK(bootArg == 0 ? r.rc == kIOReturnUnsupported : r.rc != kIOReturnUnsupported);
++        else if (keybag.count(sel)) CHECK(bootArg == 0 || !volatileStorage ? r.rc == kIOReturnUnsupported : r.rc != kIOReturnUnsupported);
+         else CHECK(r.rc == kIOReturnUnsupported);
+     }
+     {
+         std::lock_guard<std::mutex> g(callsMutex);
+         CHECK(calls.size() > 300);   // Stage7Probe sees every call with its result
+     }
++    CHECK((bootArg != 0 && !volatileStorage) == (tracesContaining("persistent Data storage") != 0));
+     CHECK(client->clientClose() == kIOReturnSuccess && client->terminated);
++    storageVolatile = true;
+ }
+ 
+ static void startFailures() {
+@@ -109,6 +112,9 @@
+     closedBoundary();
+     stateAnswers(-1);   // pagani-keybag absent: on
+     stateAnswers(0);    // pagani-keybag=0: the table before the keybag, exactly
++    stateAnswers(-1, false);   // persistent Data storage: no keybag, whatever the boot argument says
++    stateAnswers(1, false);
++    stateAnswers(2, false);
+     startFailures();
+     CHECK(locksAlive == 0);
+     printf("PASS: closed boundary by default; state mode answers the state/bookkeeping selectors (device state also through a prepared "
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/host.h b/Test/host.h
+--- a/Test/host.h	2026-10-31 09:16:36
++++ b/Test/host.h	2026-11-01 12:30:58
+@@ -23,6 +23,7 @@
+ namespace host {
+ // Stage7Probe's hooks.
+ bool stateEnabled;
++bool storageVolatile = true;
+ unsigned refused, opened;
+ uint32_t lockState;
+ std::mutex callsMutex;
+@@ -67,6 +68,7 @@
+ crypto_functions_t g_crypto_funcs = &host::functions;
+ 
+ extern "C" bool native_aks_state_enabled() { return host::stateEnabled; }
++extern "C" bool native_aks_storage_volatile() { return host::storageVolatile; }
+ extern "C" uint32_t native_aks_lock_state() { return host::lockState; }
+ extern "C" void native_keyevents_open_refused() { ++host::refused; }
+ extern "C" void native_aks_opened() { ++host::opened; }

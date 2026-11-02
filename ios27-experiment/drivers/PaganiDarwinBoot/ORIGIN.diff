@@ -1,0 +1,726 @@
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/DarwinBootPkg/Driver/DarwinBoot.c b/DarwinBootPkg/Driver/DarwinBoot.c
+--- a/DarwinBootPkg/Driver/DarwinBoot.c	2026-10-29 10:38:54
++++ b/DarwinBootPkg/Driver/DarwinBoot.c	2026-11-01 11:53:48
+@@ -92,6 +92,7 @@
+   Status = File->GetInfo (File, &gEfiFileInfoGuid, &InfoSize, Info);
+   if (EFI_ERROR (Status)) { goto Done; }
+   if ((Info->Attribute & EFI_FILE_DIRECTORY) || (Info->FileSize == 0) || (Info->FileSize > Limit)) {
++    Print (L"DARWINBOOT: %s attr %lx size %lu limit %lu\n", Path, (UINT64)Info->Attribute, (UINT64)Info->FileSize, (UINT64)Limit);
+     Status = EFI_BAD_BUFFER_SIZE;
+     goto Done;
+   }
+@@ -110,7 +111,7 @@
+ 
+ STATIC
+ EFI_STATUS
+-ParseKernel (CONST UINT8 *Data, UINTN Size, KERNEL *Kernel)
++ParseKernelHeader (CONST UINT8 *Data, UINTN Size, UINTN Header, KERNEL *Kernel)
+ {
+   UINTN    Offset;
+   UINTN    End;
+@@ -123,15 +124,19 @@
+   BOOLEAN  HasEntry;
+   BOOLEAN  Executable;
+ 
+-  if ((Size < 32) || (U32 (Data) != 0xfeedfacf) || (U32 (Data + 4) != 0x100000c) ||
+-      (U32 (Data + 8) != 0) || (U32 (Data + 12) != 2)) {
++  if ((Header > Size) || (Size - Header < 32) ||
++      (U32 (Data + Header) != 0xfeedfacf) || (U32 (Data + Header + 4) != 0x100000c) ||
++      (((U32 (Data + Header + 8) & 0x00ffffff) != 0) &&
++       ((U32 (Data + Header + 8) & 0x00ffffff) != 2)) ||
++      ((U32 (Data + Header + 12) != 2) &&
++       ((Header != 0) || (U32 (Data + Header + 12) != 12)))) {
+     return EFI_UNSUPPORTED;
+   }
+-  if (U32 (Data + 20) > Size - 32) { return EFI_LOAD_ERROR; }
++  if (U32 (Data + Header + 20) > Size - Header - 32) { return EFI_LOAD_ERROR; }
+   ZeroMem (Kernel, sizeof (*Kernel));
+-  Count = U32 (Data + 16);
+-  End = 32 + U32 (Data + 20);
+-  Offset = 32;
++  Count = U32 (Data + Header + 16);
++  End = Header + 32 + U32 (Data + Header + 20);
++  Offset = Header + 32;
+   HasEntry = FALSE;
+   for (Index = 0; Index < Count; Index++) {
+     if (End - Offset < 8) { return EFI_LOAD_ERROR; }
+@@ -180,9 +185,89 @@
+   return EFI_SUCCESS;
+ }
+ 
++// Fileset segment offsets are absolute in the collection. XNU rebases and
++// signs its own fixup chains after entry; firmware only copies root mappings.
+ STATIC
++EFI_STATUS
++ParseKernel (CONST UINT8 *Data, UINTN Size, KERNEL *Kernel)
++{
++  EFI_STATUS Status;
++  KERNEL     Member;
++  UINTN      Offset;
++  UINTN      End;
++  UINTN      Header;
++  UINTN      Name;
++  UINTN      Index;
++  UINTN      Other;
++  UINT32     Length;
++  BOOLEAN    Found;
++  BOOLEAN    Covered;
++  SEGMENT    *Child;
++  SEGMENT    *Parent;
++
++  Status = ParseKernelHeader (Data, Size, 0, Kernel);
++  if (EFI_ERROR (Status) || (U32 (Data + 12) != 12)) { return Status; }
++  Offset = 32;
++  End = 32 + U32 (Data + 20);
++  Found = FALSE;
++  while (Offset < End) {
++    Length = U32 (Data + Offset + 4);
++    if (U32 (Data + Offset) == 0x80000035) {
++      if (Length < 40) { return EFI_LOAD_ERROR; }
++      Name = U32 (Data + Offset + 24);
++      if ((Name < 32) || (Name >= Length)) { return EFI_LOAD_ERROR; }
++      for (Index = Name; (Index < Length) && (Data[Offset + Index] != 0); Index++) {}
++      if (Index == Length) { return EFI_LOAD_ERROR; }
++      Header = U64 (Data + Offset + 16);
++      if ((Header > Size) || (Size - Header < 32) || (Header & 7)) { return EFI_LOAD_ERROR; }
++      // Every indexed header must actually be loaded at its advertised VA.
++      Covered = FALSE;
++      for (Other = 0; Other < Kernel->Count; Other++) {
++        Parent = &Kernel->Segments[Other];
++        if ((Header >= Parent->FileOffset) &&
++            (Header - Parent->FileOffset <= Parent->FileSize) &&
++            (32 <= Parent->FileSize - (Header - Parent->FileOffset)) &&
++            (U64 (Data + Offset + 8) == Parent->Address + Header - Parent->FileOffset)) {
++          Covered = TRUE;
++        }
++      }
++      if (!Covered) { return EFI_LOAD_ERROR; }
++      if ((Index - Name == sizeof ("com.apple.kernel") - 1) &&
++          (CompareMem (Data + Offset + Name, "com.apple.kernel", sizeof ("com.apple.kernel")) == 0)) {
++        if (Found || (U32 (Data + Header + 12) != 2) ||
++            (U32 (Data + Header + 8) != U32 (Data + 8)) ||
++            ((U32 (Data + Header + 24) & 0x80000000) == 0)) { return EFI_LOAD_ERROR; }
++        Found = TRUE;
++        Status = ParseKernelHeader (Data, Size, Header, &Member);
++        if (EFI_ERROR (Status) || (Member.Entry != Kernel->Entry)) { return EFI_LOAD_ERROR; }
++        for (Index = 0; Index < Member.Count; Index++) {
++          Child = &Member.Segments[Index];
++          Covered = FALSE;
++          for (Other = 0; Other < Kernel->Count; Other++) {
++            Parent = &Kernel->Segments[Other];
++            if ((Child->Address >= Parent->Address) &&
++                (Child->Address - Parent->Address <= Parent->Size) &&
++                (Child->Size <= Parent->Size - (Child->Address - Parent->Address)) &&
++                ((Child->Protection & ~Parent->Protection) == 0) &&
++                ((Child->FileSize == 0) ||
++                 ((Child->Address - Parent->Address <= Parent->FileSize) &&
++                  (Child->FileSize <= Parent->FileSize - (Child->Address - Parent->Address)) &&
++                  (Child->FileOffset == Parent->FileOffset + Child->Address - Parent->Address)))) {
++              Covered = TRUE;
++            }
++          }
++          if (!Covered) { return EFI_LOAD_ERROR; }
++        }
++      }
++    }
++    Offset += Length;
++  }
++  return Found ? EFI_SUCCESS : EFI_LOAD_ERROR;
++}
++
++STATIC
+ BOOLEAN
+-AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN ParentPath, UINTN *RamdiskOffset, UINTN *TrustCacheOffset, UINT64 *WindowSize, BOOLEAN *KeepPacked, UINTN DramOffsets[2])
++AdtNode (CONST UINT8 *Data, UINTN Size, UINTN *Offset, UINTN Depth, UINTN ParentPath, UINTN *RamdiskOffset, UINTN *TrustCacheOffset, UINTN *AddonOffset, UINTN *PolicyOffset, UINT64 *WindowSize, BOOLEAN *KeepPacked, UINTN DramOffsets[2])
+ {
+   UINT32 Properties;
+   UINT32 Children;
+@@ -191,6 +276,8 @@
+   UINTN  Path;
+   UINTN  Candidate;
+   UINTN  TrustCandidate;
++  UINTN  AddonCandidate;
++  UINTN  PolicyCandidate;
+   UINTN  MemoryCandidate;
+   UINTN  DramCandidate[2];
+   UINTN  Field;
+@@ -201,6 +288,8 @@
+   NameLength = 0;
+   Candidate = MAX_UINTN;
+   TrustCandidate = MAX_UINTN;
++  AddonCandidate = MAX_UINTN;
++  PolicyCandidate = MAX_UINTN;
+   MemoryCandidate = MAX_UINTN;
+   DramCandidate[0] = DramCandidate[1] = MAX_UINTN;
+   if ((Depth > 64) || (Size - *Offset < 8)) { return FALSE; }
+@@ -232,6 +321,14 @@
+       if ((TrustCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
+       TrustCandidate = *Offset;
+     }
++    if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "GpuAddon") == 0) {
++      if ((AddonCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
++      AddonCandidate = *Offset;
++    }
++    if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "RootPolicies") == 0) {
++      if ((PolicyCandidate != MAX_UINTN) || (Length != 16)) { return FALSE; }
++      PolicyCandidate = *Offset;
++    }
+     if (AsciiStrCmp ((CONST CHAR8 *)(Data + *Offset - 36), "darwinboot-memory-size") == 0) {
+       if ((MemoryCandidate != MAX_UINTN) || (Length != 8)) { return FALSE; }
+       MemoryCandidate = *Offset;
+@@ -258,6 +355,14 @@
+     if (*TrustCacheOffset != MAX_UINTN) { return FALSE; }
+     *TrustCacheOffset = TrustCandidate;
+   }
++  if ((Path == 2) && (AddonCandidate != MAX_UINTN)) {
++    if (*AddonOffset != MAX_UINTN) { return FALSE; }
++    *AddonOffset = AddonCandidate;
++  }
++  if (PolicyCandidate != MAX_UINTN) {
++    if ((Path != 2) || (*PolicyOffset != MAX_UINTN)) { return FALSE; }
++    *PolicyOffset = PolicyCandidate;
++  }
+   if (MemoryCandidate != MAX_UINTN) {
+     if ((Path != 1) || (*WindowSize != 0)) { return FALSE; }
+     *WindowSize = U64 (Data + MemoryCandidate);
+@@ -271,7 +376,7 @@
+   }
+   if (Children > (Size - *Offset) / 8) { return FALSE; }
+   for (Index = 0; Index < Children; Index++) {
+-    if (!AdtNode (Data, Size, Offset, Depth + 1, Path, RamdiskOffset, TrustCacheOffset, WindowSize, KeepPacked, DramOffsets)) { return FALSE; }
++    if (!AdtNode (Data, Size, Offset, Depth + 1, Path, RamdiskOffset, TrustCacheOffset, AddonOffset, PolicyOffset, WindowSize, KeepPacked, DramOffsets)) { return FALSE; }
+   }
+   return TRUE;
+ }
+@@ -470,9 +575,11 @@
+   VOID                            *Image;
+   VOID                            *Tree;
+   VOID                            *TrustCaches;
++  VOID                            *Addon;
+   UINTN                           ImageSize;
+   UINTN                           TreeSize;
+   UINTN                           TrustCacheSize;
++  UINTN                           AddonSize;
+   CHAR16                          *TreePath;
+   UINTN                           Length;
+   UINTN                           Index;
+@@ -492,6 +599,12 @@
+   BOOLEAN                         KeepPacked;
+   UINTN                           TrustCacheOffset;
+   UINT64                          TrustCacheAddress;
++  UINTN                           AddonOffset;
++  UINT64                          AddonAddress;
++  VOID                            *Policies;
++  UINTN                           PolicySize;
++  UINTN                           PolicyOffset;
++  UINT64                          PolicyAddress;
+   DARWIN_BOOT_ARGS                *Args;
+   EFI_MEMORY_DESCRIPTOR           *Map;
+   UINTN                           Capacity;
+@@ -511,12 +624,16 @@
+     return EFI_UNSUPPORTED;
+   }
+   if (!RamdiskLayout (Request->Ramdisk, Request->RamdiskSize, &RamdiskExpandedSize, &RamdiskPacked)) {
++    Print (L"DARWINBOOT: ramdisk layout rejected, %lu bytes\n", (UINT64)Request->RamdiskSize);
+     return EFI_BAD_BUFFER_SIZE;
+   }
+   ZeroMem (CommandLine, sizeof (CommandLine));
+   if (Request->BootArgs != NULL) {
+     for (Index = 0; Request->BootArgs[Index] != 0; Index++) {
+-      if ((Index >= sizeof (CommandLine) - 1) || (Request->BootArgs[Index] > 0x7f)) { return EFI_BAD_BUFFER_SIZE; }
++      if ((Index >= sizeof (CommandLine) - 1) || (Request->BootArgs[Index] > 0x7f)) {
++        Print (L"DARWINBOOT: boot args rejected at %lu\n", (UINT64)Index);
++        return EFI_BAD_BUFFER_SIZE;
++      }
+       CommandLine[Index] = (CHAR8)Request->BootArgs[Index];
+     }
+   }
+@@ -524,6 +641,10 @@
+   Image = NULL;
+   Tree = NULL;
+   TrustCaches = NULL;
++  Addon = NULL;
++  AddonSize = 0;
++  Policies = NULL;
++  PolicySize = 0;
+   TreePath = NULL;
+   Map = NULL;
+   Address = 0;
+@@ -547,9 +668,11 @@
+   RamdiskOffset = MAX_UINTN;
+   DramOffsets[0] = DramOffsets[1] = MAX_UINTN;
+   TrustCacheOffset = MAX_UINTN;
++  AddonOffset = MAX_UINTN;
++  PolicyOffset = MAX_UINTN;
+   WindowSize = 0;
+   KeepPacked = FALSE;
+-  if (!AdtNode (Tree, TreeSize, &Offset, 0, 3, &RamdiskOffset, &TrustCacheOffset, &WindowSize, &KeepPacked, DramOffsets) || (Offset != TreeSize)) { Status = EFI_COMPROMISED_DATA; goto Fail; }
++  if (!AdtNode (Tree, TreeSize, &Offset, 0, 3, &RamdiskOffset, &TrustCacheOffset, &AddonOffset, &PolicyOffset, &WindowSize, &KeepPacked, DramOffsets) || (Offset != TreeSize)) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   if ((DramOffsets[0] == MAX_UINTN) != (DramOffsets[1] == MAX_UINTN)) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   if ((DramOffsets[0] != MAX_UINTN) && ((U64 ((UINT8 *)Tree + DramOffsets[0]) == 0) != (U64 ((UINT8 *)Tree + DramOffsets[1]) == 0))) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+   if (KeepPacked && (!RamdiskPacked || (RamdiskOffset == MAX_UINTN))) { Status = EFI_COMPROMISED_DATA; goto Fail; }
+@@ -576,6 +699,43 @@
+     Status = EFI_COMPROMISED_DATA;
+     goto Fail;
+   }
++  //
++  // The GPU addon (kernel.macho.gpuaddon, scripts/make-gpu-addon.py): files the kernel writes into the Data volume before its addon
++  // mounts. Only its header is checked here; the kernel validates every entry.
++  //
++  CopyMem (TreePath, Request->KernelPath, Length);
++  StrCatS (TreePath, Length / sizeof (CHAR16) + 11, L".gpuaddon");
++  Status = ReadFile (Root, TreePath, SIZE_64MB, &Addon, &AddonSize);
++  if (EFI_ERROR (Status) && (Status != EFI_NOT_FOUND)) { goto Fail; }
++  if (Addon != NULL) {
++    if ((AddonOffset == MAX_UINTN) || (U64 ((UINT8 *)Tree + AddonOffset) != 0) || (U64 ((UINT8 *)Tree + AddonOffset + 8) != 0) ||
++        (AddonSize < 24) || (CompareMem (Addon, "NGPUADD2", 8) != 0) || (U64 ((UINT8 *)Addon + 16) != AddonSize)) {
++      Status = EFI_COMPROMISED_DATA;
++      goto Fail;
++    }
++  } else if (AddonOffset != MAX_UINTN) {
++    Status = EFI_COMPROMISED_DATA;
++    goto Fail;
++  }
++  // Root hash tables live outside the kernel's coalesced constant segments.
++  // The kernel authenticates each envelope against its compiled owner anchor.
++  CopyMem (TreePath, Request->KernelPath, Length);
++  StrCatS (TreePath, Length / sizeof (CHAR16) + 11, L".vroot");
++  Status = ReadFile (Root, TreePath, SIZE_128MB, &Policies, &PolicySize);
++  if (EFI_ERROR (Status) && (Status != EFI_NOT_FOUND)) { goto Fail; }
++  if (Policies != NULL) {
++    if ((PolicyOffset == MAX_UINTN) || (U64 ((UINT8 *)Tree + PolicyOffset) != 0) ||
++        (U64 ((UINT8 *)Tree + PolicyOffset + 8) != 0) || (PolicySize < 32) ||
++        (CompareMem (Policies, "VROOTB01", 8) != 0) || (U64 ((UINT8 *)Policies + 8) != 1) ||
++        (U64 ((UINT8 *)Policies + 16) == 0) || (U64 ((UINT8 *)Policies + 16) > 16) ||
++        (U64 ((UINT8 *)Policies + 24) != PolicySize)) {
++      Status = EFI_COMPROMISED_DATA;
++      goto Fail;
++    }
++  } else if (PolicyOffset != MAX_UINTN) {
++    Status = EFI_COMPROMISED_DATA;
++    goto Fail;
++  }
+   Status = ReadBootVideo (Video);
+   if (EFI_ERROR (Status)) { goto Fail; }
+   Status = AllocateWindow (&Kernel, WindowSize, &Address);
+@@ -585,8 +745,14 @@
+   RamdiskAddress = ALIGN_VALUE (TreeAddress + TreeSize, EFI_PAGE_SIZE);
+   RamdiskBytes = ALIGN_VALUE (KeepPacked ? Request->RamdiskSize : RamdiskExpandedSize, EFI_PAGE_SIZE);
+   TrustCacheAddress = RamdiskAddress + RamdiskBytes;
+-  Used = ALIGN_VALUE (TrustCacheAddress + TrustCacheSize, SIZE_16KB) - Address;
+-  if (Used > WindowSize - BLOCK_SIZE) { Status = EFI_BAD_BUFFER_SIZE; goto Fail; }
++  AddonAddress = ALIGN_VALUE (TrustCacheAddress + TrustCacheSize, SIZE_16KB);
++  PolicyAddress = ALIGN_VALUE (AddonAddress + AddonSize, SIZE_16KB);
++  Used = ALIGN_VALUE (PolicyAddress + PolicySize, SIZE_16KB) - Address;
++  if (Used > WindowSize - BLOCK_SIZE) {
++    Print (L"DARWINBOOT: used %lu window %lu kernel %lu ramdisk %lu\n", (UINT64)Used, (UINT64)WindowSize, (UINT64)(Kernel.End - Kernel.Base), (UINT64)RamdiskBytes);
++    Status = EFI_BAD_BUFFER_SIZE;
++    goto Fail;
++  }
+   ZeroMem ((VOID *)(UINTN)Address, (UINTN)Used);
+   for (Index = 0; Index < Kernel.Count; Index++) {
+     CopyMem ((VOID *)(UINTN)(Address + Kernel.Segments[Index].Address - Kernel.Base),
+@@ -622,6 +788,18 @@
+     WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + TrustCacheOffset + 8), TrustCacheSize);
+     FreePool (TrustCaches); TrustCaches = NULL;
+   }
++  if (Addon != NULL) {
++    CopyMem ((VOID *)(UINTN)AddonAddress, Addon, AddonSize);
++    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + AddonOffset), AddonAddress);
++    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + AddonOffset + 8), AddonSize);
++    FreePool (Addon); Addon = NULL;
++  }
++  if (Policies != NULL) {
++    CopyMem ((VOID *)(UINTN)PolicyAddress, Policies, PolicySize);
++    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + PolicyOffset), PolicyAddress);
++    WriteUnaligned64 ((UINT64 *)(UINTN)(TreeAddress + PolicyOffset + 8), PolicySize);
++    FreePool (Policies); Policies = NULL;
++  }
+   FreePool (Image); Image = NULL;
+   FreePool (Tree); Tree = NULL;
+   FreePool (TreePath); TreePath = NULL;
+@@ -632,6 +810,7 @@
+          Kernel.Base, Address, ArgsAddress, Address + Kernel.Entry - Kernel.Base, (UINT64)WindowSize);
+   Print (L"DARWINBOOT: video base=0x%lx display=%lu row=%lu width=%lu height=%lu depth=%lu\n",
+          Video[0], Video[1], Video[2], Video[3], Video[4], Video[5]);
++  Print (L"DARWINBOOT: command line: %a\n", CommandLine);
+   Print (L"DARWINBOOT: inputs validated; exiting boot services\n");
+ 
+   //
+@@ -676,6 +855,8 @@
+   if (Image != NULL) { FreePool (Image); }
+   if (Tree != NULL) { FreePool (Tree); }
+   if (TrustCaches != NULL) { FreePool (TrustCaches); }
++  if (Addon != NULL) { FreePool (Addon); }
++  if (Policies != NULL) { FreePool (Policies); }
+   if (TreePath != NULL) { FreePool (TreePath); }
+   if (Map != NULL) { FreePool (Map); }
+   if (Address != 0) { gBS->FreePages (Address, EFI_SIZE_TO_PAGES (WindowSize)); }
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/README.md b/README.md
+--- a/README.md	2026-10-29 10:38:54
++++ b/README.md	2026-11-01 12:43:57
+@@ -2,6 +2,7 @@
+ 
+ UEFI bootloader for UniXNU. Loads the payload, kernel, device tree and trust cache, then starts XNU.
+ 
+-Current state: boots from the firmware volume and supports the packed RAM disk handoff.
++Current state: boots from the firmware volume and supports the packed RAM disk handoff. Takes arm64 and arm64e kernels, plain or as an
++`MH_FILESET` kernel collection, and hands `<kernel>.vroot` (root policies) to the kernel through `/chosen/memory-map/RootPolicies`.
+ 
+ Built as part of the firmware volume.
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/Kernel.S b/Test/Kernel.S
+--- a/Test/Kernel.S	2026-10-29 10:38:54
++++ b/Test/Kernel.S	2026-11-01 12:03:54
+@@ -6,6 +6,9 @@
+ #ifndef FIXTURE_ADT_EXTRA
+ #define FIXTURE_ADT_EXTRA 0
+ #endif
++#ifndef FIXTURE_VROOT
++#define FIXTURE_VROOT 0
++#endif
+ .section .text, "ax"
+ .global _start
+ _start:
+@@ -144,6 +147,28 @@
+   cbnz w13, failed
+   ldrb w13, [x12, #4095]
+   cbnz w13, failed
++#if FIXTURE_VROOT
++  // The root policy sidecar: the whole 4 KiB envelope, patched into the ADT, past the trust cache and inside the used window.
++  add x14, x6, #304 + FIXTURE_ADT_EXTRA
++  ldp w9, w15, [x14]
++  orr x9, x9, x15, lsl #32
++  ldp w10, w15, [x14, #8]
++  orr x10, x10, x15, lsl #32
++  cmp x10, #0x1000
++  b.ne failed
++  tst x9, #0x3fff
++  b.ne failed
++  cmp x9, x12
++  b.ls failed
++  add x10, x9, x10
++  ldr x15, [x0, #32]
++  cmp x10, x15
++  b.hi failed
++  ldr x10, [x9]
++  ldr x15, =0x313042544f4f5256
++  cmp x10, x15
++  b.ne failed
++#endif
+   add x6, x5, #0x4000
+   mov x7, #0x200
+ 1:
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/Validation.c b/Test/Validation.c
+--- a/Test/Validation.c	2026-10-29 10:38:54
++++ b/Test/Validation.c	2026-11-01 11:58:04
+@@ -73,6 +73,9 @@
+                           L"duplicate-trustcache", L"bad-trustcache-version", L"bad-trustcache-count",
+                           L"bad-trustcache-offset", L"bad-trustcache-order" };
+ 
++  CHAR16 *PolicyPaths[] = { L"orphan-vroot", L"missing-vroot", L"stale-vroot", L"bad-vroot-magic",
++                           L"bad-vroot-version", L"bad-vroot-count", L"bad-vroot-size" };
++
+   CHAR16 *MemoryPaths[] = { L"bad-memory-size", L"small-memory-window", L"unaligned-memory-window",
+                            L"large-memory-window", L"duplicate-memory-window", L"misplaced-memory-window" };
+ 
+@@ -133,6 +136,16 @@
+     }
+   }
+   Print (L"DARWINBOOT-VALIDATION: 33 rejected requests; firmware retained PASS\n");
++  for (Index = 0; Index < ARRAY_SIZE (PolicyPaths); Index++) {
++    UnicodeSPrint (Path, sizeof (Path), L"\\EFI\\UniXNU\\Payloads\\%s.macho", PolicyPaths[Index]);
++    Request.KernelPath = Path;
++    Status = Loader->Boot (Loader, &Request);
++    if (Status != EFI_COMPROMISED_DATA) {
++      Print (L"DARWINBOOT-VALIDATION: %s returned %r\n", PolicyPaths[Index], Status);
++      goto Failed;
++    }
++  }
++  Print (L"DARWINBOOT-VALIDATION: 7 root policy sidecars refused PASS\n");
+   if (EFI_ERROR (ValidateVideo ())) { goto Failed; }
+   return EFI_SUCCESS;
+ Failed:
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/make-fixtures.py b/Test/make-fixtures.py
+--- a/Test/make-fixtures.py	2026-10-29 10:38:54
++++ b/Test/make-fixtures.py	2026-11-01 11:58:04
+@@ -14,6 +14,8 @@
+     parser.add_argument('output', type=Path)
+     parser.add_argument('--memory-size', type=lambda value: int(value, 0), choices=[0x10000000, 0x20000000])
+     parser.add_argument('--gop', action='store_true')
++    parser.add_argument('--fileset', action='store_true', help='Make kernel.macho an arm64e MH_FILESET with a com.apple.kernel member')
++    parser.add_argument('--vroot', action='store_true', help='Give kernel.macho a root policy sidecar and check its handoff in the fixture')
+     args = parser.parse_args()
+     output = args.output.resolve()
+     output.mkdir(parents=True, exist_ok=True)
+@@ -23,6 +25,7 @@
+     subprocess.run([tools['clang'], '--target=aarch64-none-elf', '-c',
+                     f'-DFIXTURE_WINDOW_SIZE={args.memory_size or 0x10000000}',
+                     f'-DFIXTURE_GOP={int(args.gop)}',
++                    f'-DFIXTURE_VROOT={int(args.vroot)}',
+                     f'-DFIXTURE_ADT_EXTRA={44 if args.memory_size else 0}',
+                     str(Path(__file__).with_name('Kernel.S')), '-o', str(output / 'kernel.o')], check=True)
+     subprocess.run([tools['ld.lld'], f'-Ttext={BASE + 0x1000:#x}', '-e', '_start',
+@@ -46,6 +49,22 @@
+     image[:32] = struct.pack('<8I', 0xfeedfacf, 0x100000c, 0, 2, 3, len(commands), 0, 0)
+     image[32:32 + len(commands)] = commands
+     image[0x1000:0x1000 + len(code)] = code
++
++    def fileset_image():
++        # The same segments and entry as a collection: the root header adds the entry of the kernel member, whose own header sits
++        # inside the root's TEXT segment and whose segment lies inside it, with file offsets absolute in the collection.
++        name = b'com.apple.kernel\0'
++        entry = struct.pack('<IIQQII', 0x80000035, 32 + len(name) + (-len(name) % 8), BASE + 0x800, 0x800, 32, 0) + name + bytes(-len(name) % 8)
++        root = commands + entry
++        member = segment(b'__TEXT', BASE + 0x1000, 0x1000, 0x1000, 0x1000, 5) + struct.pack('<IIII', 5, 288, 6, 68) + state
++        data = bytearray(image)
++        data[:0x800] = bytes(0x800)
++        data[:32] = struct.pack('<8I', 0xfeedfacf, 0x100000c, 0x80000002, 12, 4, len(root), 0, 0)
++        data[32:32 + len(root)] = root
++        data[0x800:0x820] = struct.pack('<8I', 0xfeedfacf, 0x100000c, 0x80000002, 2, 2, len(member), 0x80000000, 0)
++        data[0x820:0x820 + len(member)] = member
++        return bytes(data)
++
+     tree = struct.pack('<II32sI12s', 1, 0, b'name', 12, b'device-tree\0')
+     def node(name, properties=(), children=()):
+         props = [('name', name.encode() + b'\0'), *properties]
+@@ -62,10 +81,27 @@
+         memory = node('memory-map', [('TrustCache', value)])
+         return node('device-tree', children=[node('chosen', children=[memory] * (2 if duplicate else 1))])
+ 
++    def policy_tree(value):
++        return node('device-tree', children=[node('chosen', children=[node('memory-map', [('RootPolicies', value)])])])
++
+     empty_tree = tree
+     tree = node('device-tree', children=[node('chosen',
+         [('darwinboot-memory-size', struct.pack('<Q', args.memory_size))] if args.memory_size else [], children=[
+-        node('memory-map', [('RAMDisk', bytes(16)), ('TrustCache', bytes(16))])])])
++        node('memory-map', [('RAMDisk', bytes(16)), ('TrustCache', bytes(16))] +
++             ([('RootPolicies', bytes(16))] if args.vroot else []))])])
++    policy = bytearray(4096)
++    struct.pack_into('<8sQQQ', policy, 0, b'VROOTB01', 1, 1, len(policy))
++    def changed_policy(offset, fmt, value):
++        data = bytearray(policy)
++        struct.pack_into(fmt, data, offset, value)
++        return bytes(data)
++    vroot_variants = {'orphan-vroot': bytes(policy), 'stale-vroot': bytes(policy),
++                      'bad-vroot-magic': changed_policy(0, '<8s', b'VROOTB02'),
++                      'bad-vroot-version': changed_policy(8, '<Q', 2),
++                      'bad-vroot-count': changed_policy(16, '<Q', 17),
++                      'bad-vroot-size': changed_policy(24, '<Q', len(policy) * 2)}
++    if args.vroot:
++        vroot_variants['kernel'] = bytes(policy)
+     extra_trees = {'missing-ramdisk-adt': empty_tree,
+                    'stale-ramdisk-adt': ramdisk_tree(struct.pack('<QQ', 0x1000, 0x1000)),
+                    'bad-ramdisk-size': ramdisk_tree(bytes(8)),
+@@ -76,7 +112,11 @@
+                    'duplicate-trustcache': trust_tree(bytes(16), duplicate=True),
+                    **{name: trust_tree(bytes(16)) for name in
+                       ('bad-trustcache-version', 'bad-trustcache-count',
+-                       'bad-trustcache-offset', 'bad-trustcache-order')}}
++                       'bad-trustcache-offset', 'bad-trustcache-order')},
++                   'orphan-vroot': empty_tree, 'missing-vroot': policy_tree(bytes(16)),
++                   'stale-vroot': policy_tree(struct.pack('<QQ', 0x1000, 4096)),
++                   **{name: policy_tree(bytes(16)) for name in
++                      ('bad-vroot-magic', 'bad-vroot-version', 'bad-vroot-count', 'bad-vroot-size')}}
+     for name, properties in {
+             'bad-memory-size': [('darwinboot-memory-size', bytes(4))],
+             'unavailable-memory-window': [('darwinboot-memory-size', struct.pack('<Q', 0x40000000))],
+@@ -100,9 +140,9 @@
+     struct.pack_into('<I', unordered, 28, 2)
+     trust_variants['bad-trustcache-order'] = unordered
+     (output / 'ramdisk.bin').write_bytes(b'DRAMDISK' + bytes(4088) + b'\xa5')
+-    variants = {'kernel': bytes(image), 'bad-adt': bytes(image), 'missing-adt': bytes(image),
++    variants = {'kernel': fileset_image() if args.fileset else bytes(image), 'bad-adt': bytes(image), 'missing-adt': bytes(image),
+                 **{name: bytes(image) for name in extra_trees}}
+-    for name, offset, fmt, value in [('bad-subtype', 8, '<I', 2),
++    for name, offset, fmt, value in [('bad-subtype', 8, '<I', 3),
+                                      ('bad-command', 20, '<I', len(image)),
+                                      ('bad-overlap', 32 + 72 + 24, '<Q', BASE + 0x1000),
+                                      ('bad-entry', 32 + 144 + 272, '<Q', BASE + 0x3000)]:
+@@ -118,6 +158,10 @@
+         sidecar.unlink(missing_ok=True)
+         if name in trust_variants:
+             sidecar.write_bytes(trust_variants[name])
++        policies = path.with_suffix('.macho.vroot')
++        policies.unlink(missing_ok=True)
++        if name in vroot_variants:
++            policies.write_bytes(vroot_variants[name])
+         if name != 'missing-adt':
+             adt.write_bytes(b'\xff' * 8 if name == 'bad-adt' else extra_trees.get(name, tree))
+     print('Synthetic Mach-O/ADT fixtures generated')
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/test-adt.py b/Test/test-adt.py
+--- a/Test/test-adt.py	2026-10-29 10:38:54
++++ b/Test/test-adt.py	2026-11-01 11:54:34
+@@ -51,11 +51,18 @@
+         code = code.replace('#define ScanMem8 memchr', '#define ScanMem8(p,n,v) memchr(p,v,n)')
+         code += body + r'''
+ int parse(const uint8_t *data, size_t size, size_t out[2]) {
+-    size_t offset=0, ram=SIZE_MAX, trust=SIZE_MAX;
++    size_t offset=0, ram=SIZE_MAX, trust=SIZE_MAX, addon=SIZE_MAX, policy=SIZE_MAX;
+     uint64_t window=0; int packed=0;
+     out[0]=out[1]=SIZE_MAX;
+-    return AdtNode(data,size,&offset,0,3,&ram,&trust,&window,&packed,out) && offset==size;
++    return AdtNode(data,size,&offset,0,3,&ram,&trust,&addon,&policy,&window,&packed,out) && offset==size;
+ }
++/* The two sidecar placeholders the loader fills: 1 with their offsets (SIZE_MAX when absent) on a valid tree. */
++int sidecars(const uint8_t *data, size_t size, size_t out[2]) {
++    size_t offset=0, ram=SIZE_MAX, trust=SIZE_MAX, dram[2]={SIZE_MAX,SIZE_MAX};
++    uint64_t window=0; int packed=0;
++    out[0]=out[1]=SIZE_MAX;
++    return AdtNode(data,size,&offset,0,3,&ram,&trust,&out[0],&out[1],&window,&packed,dram) && offset==size;
++}
+ '''
+         path = Path(cls.temp.name)
+         (path / 'parser.c').write_text(code)
+@@ -63,6 +70,7 @@
+                         path / 'parser.c', '-o', path / 'parser.so'], check=True)
+         cls.lib = ctypes.CDLL(str(path / 'parser.so'))
+         cls.lib.parse.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.POINTER(ctypes.c_size_t)]
++        cls.lib.sidecars.argtypes = cls.lib.parse.argtypes
+ 
+     def parse(self, data):
+         offsets = (ctypes.c_size_t * 2)()
+@@ -86,6 +94,30 @@
+             self.assertEqual(self.parse(node('device-tree', children=[node(name, properties)]))[0], 0)
+         chosen = node('chosen', [('dram-base', bytes(8)), ('dram-size', bytes(8))])
+         self.assertEqual(self.parse(node('device-tree', children=[chosen, chosen]))[0], 0)
++
++
++class SidecarTest(AdtParserTest):
++    def sidecars(self, data):
++        offsets = (ctypes.c_size_t * 2)()
++        return self.lib.sidecars(data, len(data), offsets), list(offsets)
++
++    def memory_map(self, *properties, name='memory-map', parent='chosen'):
++        return node('device-tree', children=[node(parent, children=[node(name, list(properties))])])
++
++    def test_placeholders_under_memory_map(self):
++        data = self.memory_map(('GpuAddon', bytes(16)), ('RootPolicies', bytes(16)))
++        valid, offsets = self.sidecars(data)
++        self.assertEqual(valid, 1)
++        self.assertEqual([data[o:o + 16] for o in offsets], [bytes(16), bytes(16)])
++        self.assertEqual(self.sidecars(self.memory_map())[1], [ctypes.c_size_t(-1).value] * 2)
++
++    def test_refused_placeholders(self):
++        self.assertEqual(self.sidecars(self.memory_map(('RootPolicies', bytes(8))))[0], 0)
++        self.assertEqual(self.sidecars(self.memory_map(('GpuAddon', bytes(8))))[0], 0)
++        self.assertEqual(self.sidecars(self.memory_map(('RootPolicies', bytes(16)), ('RootPolicies', bytes(16))))[0], 0)
++        self.assertEqual(self.sidecars(self.memory_map(('RootPolicies', bytes(16)), name='other'))[0], 0)
++        chosen = node('chosen', children=[node('memory-map', [('RootPolicies', bytes(16))])])
++        self.assertEqual(self.sidecars(node('device-tree', children=[chosen, chosen]))[0], 0)
+ 
+ 
+ if __name__ == '__main__':
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/Test/test-kernel-parser.py b/Test/test-kernel-parser.py
+--- a/Test/test-kernel-parser.py	1969-12-31 16:00:00
++++ b/Test/test-kernel-parser.py	2026-11-01 11:54:34
+@@ -0,0 +1,109 @@
++#!/usr/bin/env python3
++"""Compile the production Mach-O parser and check architectures and bounds."""
++import ctypes
++from pathlib import Path
++import struct
++import subprocess
++import sys
++import tempfile
++
++source = (Path(__file__).resolve().parents[1] / 'DarwinBootPkg/Driver/DarwinBoot.c').read_text()
++types = source[source.index('typedef struct {'):source.index('STATIC EFI_HANDLE')]
++parser = source[source.index('STATIC\nEFI_STATUS\nParseKernelHeader'):source.index('STATIC\nBOOLEAN\nAdtNode')]
++preamble = '''
++#include <stdint.h>
++#include <stddef.h>
++#include <string.h>
++typedef uint8_t UINT8; typedef uint32_t UINT32; typedef uint64_t UINT64;
++typedef size_t UINTN; typedef int BOOLEAN; typedef int EFI_STATUS;
++#define STATIC static
++#define CONST const
++#define TRUE 1
++#define FALSE 0
++#define EFI_SUCCESS 0
++#define EFI_UNSUPPORTED 3
++#define EFI_LOAD_ERROR 1
++#define MAX_UINT64 UINT64_MAX
++#define WINDOW_SIZE 0x10000000ULL
++#define SIZE_2MB 0x200000ULL
++#define EFI_PAGE_MASK 4095
++#define MAX_SEGMENTS 64
++#define MIN(a,b) ((a)<(b)?(a):(b))
++#define MAX(a,b) ((a)>(b)?(a):(b))
++#define ZeroMem(p,n) memset(p,0,n)
++#define CompareMem(a,b,n) memcmp(a,b,n)
++#define EFI_ERROR(s) ((s) != EFI_SUCCESS)
++static UINT32 U32(const void *p) { UINT32 v; memcpy(&v,p,4); return v; }
++static UINT64 U64(const void *p) { UINT64 v; memcpy(&v,p,8); return v; }
++'''
++with tempfile.TemporaryDirectory(prefix='darwinboot-kernel-') as tmp:
++    work = Path(tmp)
++    (work / 'parser.c').write_text(preamble + types + parser + '\nint check(const UINT8 *p, UINTN n) { KERNEL k; return ParseKernel(p,n,&k); }\n')
++    subprocess.run(['clang', '-Wall', '-Wextra', '-Werror', '-shared', '-fPIC', str(work / 'parser.c'), '-o', str(work / 'parser.dylib')], check=True)
++    lib = ctypes.CDLL(str(work / 'parser.dylib'))
++    lib.check.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
++    def check(blob):
++        return lib.check(ctypes.create_string_buffer(bytes(blob)), len(blob))
++    base = 0xfffffff007004000
++    segment = struct.pack('<II16sQQQQiiII', 0x19, 72, b'__TEXT', base, 4096, 0, 4096, 5, 5, 0, 0)
++    thread = bytearray(288)
++    struct.pack_into('<4I', thread, 0, 5, 288, 6, 68)
++    struct.pack_into('<Q', thread, 272, base + 1024)
++    blob = bytearray(4096)
++    struct.pack_into('<8I', blob, 0, 0xfeedfacf, 0x100000c, 0, 2, 2, 360, 0, 0)
++    blob[32:392] = segment + thread
++    for subtype in (0, 2, 0x80000002, 0xc0000002):
++        struct.pack_into('<I', blob, 8, subtype)
++        assert check(blob) == 0, hex(subtype)
++    for offset, fmt, value, status in ((8, '<I', 3, 3), (8, '<I', 1, 3), (12, '<I', 12, 1),
++                                     (20, '<I', 4096, 1), (32+48, '<Q', 4097, 1),
++                                     (32+72+272, '<Q', base+4096, 1)):
++        bad = bytearray(blob)
++        struct.pack_into(fmt, bad, offset, value)
++        assert check(bad) == status, (offset, value)
++    assert check(blob[:31]) == 3
++    # A synthetic MH_FILESET: one root segment over the whole collection, a kernel member inside it with the root's entry point.
++    def fileset(subtype=0x80000002, member_subtype=None, member_flags=0x80000000, member_type=2, member_entry=None,
++                name=b'com.apple.kernel\0', entry_va=None, entry_off=0x1000, second_kernel=False, child_size=0x1000,
++                child_prot=5, name_offset=32):
++        root = bytearray(0x4000)
++        kernel_va = base + 0x1000
++        seg = struct.pack('<II16sQQQQiiII', 0x19, 72, b'__TEXT_EXEC', base, 0x4000, 0, 0x4000, 7, 7, 0, 0)
++        def thread_at(pc):
++            t = bytearray(288)
++            struct.pack_into('<4I', t, 0, 5, 288, 6, 68)
++            struct.pack_into('<Q', t, 272, pc)
++            return t
++        def entry(va, off, text):
++            pad = bytes(-(32 + len(text)) % 8)
++            return struct.pack('<IIQQII', 0x80000035, 32 + len(text) + len(pad), va, off, name_offset, 0) + text + pad
++        commands = seg + bytes(thread_at(kernel_va + 0x400)) + entry(kernel_va if entry_va is None else entry_va, entry_off, name)
++        count = 3
++        if second_kernel:
++            commands += entry(kernel_va, entry_off, name)
++            count += 1
++        struct.pack_into('<8I', root, 0, 0xfeedfacf, 0x100000c, subtype, 12, count, len(commands), 0, 0)
++        root[32:32 + len(commands)] = commands
++        child = struct.pack('<II16sQQQQiiII', 0x19, 72, b'__TEXT', kernel_va, child_size, 0x1000, child_size, child_prot, child_prot, 0, 0)
++        member = child + bytes(thread_at(kernel_va + 0x400 if member_entry is None else member_entry))
++        struct.pack_into('<8I', root, 0x1000, 0xfeedfacf, 0x100000c, subtype if member_subtype is None else member_subtype,
++                         member_type, 2, len(member), member_flags, 0)
++        root[0x1020:0x1020 + len(member)] = member
++        return root
++    assert check(fileset()) == 0
++    assert check(fileset(subtype=0)) == 0
++    assert check(fileset(name=b'com.apple.other\0')) == 1            # no kernel member
++    assert check(fileset(second_kernel=True)) == 1                    # two kernel members
++    assert check(fileset(member_subtype=0)) == 1                      # member of another architecture
++    assert check(fileset(member_flags=0)) == 1                        # member not marked in-cache
++    assert check(fileset(member_type=12)) == 1                        # a nested collection
++    assert check(fileset(member_entry=base + 0x1800)) == 1            # member entry differs from the collection's
++    assert check(fileset(entry_va=base + 0x2000)) == 1                # entry address is not where its header loads
++    assert check(fileset(entry_off=0x4000)) == 1                      # header outside the file
++    assert check(fileset(entry_off=0x1004)) == 1                      # misaligned header
++    assert check(fileset(child_size=0x4000)) == 1                     # member segment leaves the root segment
++    assert check(fileset(name_offset=8)) == 1                         # name inside the fixed part of the command
++    for filename in sys.argv[1:]:
++        assert check(Path(filename).read_bytes()) == 0, filename
++        print('PASS: actual kernel', filename)
++    print('PASS: arm64/arm64e capability bits, malformed ranges, synthetic fileset accepted, 11 fileset refusals')

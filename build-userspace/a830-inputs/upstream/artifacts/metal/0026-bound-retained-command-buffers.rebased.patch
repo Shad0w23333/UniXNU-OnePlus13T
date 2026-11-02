@@ -1,0 +1,109 @@
+diff --git a/crates/metal2vulkan-runtime/src/command_buffer/kept_barriers.rs b/crates/metal2vulkan-runtime/src/command_buffer/kept_barriers.rs
+index 27c5b6be..02159ff4 100644
+--- a/crates/metal2vulkan-runtime/src/command_buffer/kept_barriers.rs
++++ b/crates/metal2vulkan-runtime/src/command_buffer/kept_barriers.rs
+@@ -69,8 +69,12 @@ use std::collections::VecDeque;
+ /// The most lists of barriers a `VkQueue` keeps command buffers of.
+ pub(crate) const LISTS: usize = 8;
+ 
+-/// The most command buffers a `VkQueue` keeps of one list of barriers.
+-pub(crate) const KEPT: usize = 128;
++/// The most command buffers a `VkQueue` keeps of one list of barriers. On Turnip each is a whole
++/// `tu_cmd_buffer` (51 KiB of host memory on iOS) with at least one command-stream BO that stays
++/// mapped into the process, and the device keeps them for its life: 128 a list, 8 lists, was up to
++/// 1024 such command buffers a queue in the render server, past the GPU objects the rest of its work
++/// needs. Past 16 in flight a batch records its own, as past 128 before.
++pub(crate) const KEPT: usize = 16;
+ 
+ /// How many values of its queue's timeline a list no batch took stays kept for before a new list
+ /// may replace it: a few frames of a window server's (67 or more batches a frame).
+diff --git a/crates/metal2vulkan-runtime/src/spares.rs b/crates/metal2vulkan-runtime/src/spares.rs
+index 5a4ad4e2..f7ebda69 100644
+--- a/crates/metal2vulkan-runtime/src/spares.rs
++++ b/crates/metal2vulkan-runtime/src/spares.rs
+@@ -5,10 +5,17 @@
+ //! to 48 us and a descriptor pool 23 to 26 us on RADV (Radeon 780M), 7 to 8 and 3 on ANV, against
+ //! 0.2 and 0.02, and 1.3 and 0.1, reset.
+ //!
+-//! - **Command pools are kept, never released while the device lives**. Every command pool a
+-//!   command buffer gives back is kept, whatever its status, and every command buffer dropped with
+-//!   one gives it back too: the runtime calls `vkDestroyCommandPool` on a command buffer's pool
+-//!   only as the device is torn down, after its queues are idle.
++//! - **Command pools are kept, and trimmed by the taker**. Every command pool a command buffer gives
++//!   back is kept, whatever its status, and every command buffer dropped with one gives it back too:
++//!   the giving thread (a completion handler's) never calls `vkDestroyCommandPool`. The thread that
++//!   takes a spare releases, inside a section of the exit guard, a pool that made more than
++//!   [`POOL_COMMAND_BUFFERS`] command buffers (instead of reusing it; the command buffer then makes
++//!   its own), and the oldest spare while more than [`COMMAND_POOLS`] are kept, one a take. On Turnip
++//!   every command buffer a pool made is a whole `tu_cmd_buffer` (51 KiB of host memory) with its
++//!   command-stream BOs, each of them mapped into the process and charged to its footprint, and the
++//!   largest it ever recorded kept: unbounded, the spares held the render server's peak in flight
++//!   (after every stall) for its life. Otherwise a pool goes only as the device is torn down, after
++//!   its queues are idle.
+ //!   The spares stay bounded all the same: a command buffer makes a pool only where no spare of its
+ //!   queue's family is free, so the device holds at most as many as its command buffers held at
+ //!   once (Metal bounds those by each queue's `maxCommandBufferCount`), each holding what its
+@@ -116,6 +123,13 @@ pub(super) const DESCRIPTOR_POOLS: usize = 256;
+ /// The most descriptors the spare descriptor pools hold together.
+ pub(super) const DESCRIPTORS: u64 = 1 << 18;
+ 
++/// The most spare command pools a device keeps: past them the taker releases the oldest, one a take.
++pub(super) const COMMAND_POOLS: usize = 16;
++
++/// The most command buffers a spare command pool may have made and still be taken again: a larger
++/// one, which a peak of encoders made, is released by its taker.
++pub(super) const POOL_COMMAND_BUFFERS: usize = 128;
++
+ /// The index of `level`'s list in a [`CommandPool`]: primary 0, secondary 1.
+ fn level_index(level: vk::CommandBufferLevel) -> usize {
+     usize::from(level == vk::CommandBufferLevel::SECONDARY)
+@@ -151,6 +165,11 @@ impl CommandPool {
+         }
+     }
+ 
++    /// How many command buffers the pool made, of both levels.
++    pub(super) fn made_count(&self) -> usize {
++        self.made[0].len() + self.made[1].len()
++    }
++
+     /// The pool's primary begun ahead (the module docs), handed out: taken by the first encoder
+     /// of the command buffer that took the pool. `None` where it holds none.
+     pub(super) fn take_begun(&mut self) -> Option<vk::CommandBuffer> {
+@@ -309,9 +328,23 @@ impl Spares {
+         if exit_guard::in_section() {
+             return Ok(None);
+         }
+-        let Some(mut pool) = take_command_pool(&mut lock(&self.command_pools), family) else {
++        let (taken, past) = {
++            let mut pools = lock(&self.command_pools);
++            let taken = take_command_pool(&mut pools, family);
++            (taken, trim_command_pools(&mut pools))
++        };
++        if let Some(past) = past {
++            // SAFETY: a spare: nothing of it is pending, and nothing else holds it.
++            unsafe { release_in_section(device, past.raw) };
++        }
++        let Some(mut pool) = taken else {
+             return Ok(None);
+         };
++        if pool.made_count() > POOL_COMMAND_BUFFERS {
++            // SAFETY: as above; the caller makes a pool of its own.
++            unsafe { release_in_section(device, pool.raw) };
++            return Ok(None);
++        }
+         if pool.recording {
+             // SAFETY: the pool is the caller's alone now, and nothing of it is pending: the
+             // command buffer that gave it back ended its work or was never submitted.
+@@ -479,6 +512,12 @@ pub(super) fn keep_command_pool(pools: &mut Vec<CommandPool>, pool: CommandPool)
+     pools.push(pool);
+ }
+ 
++/// The oldest of the spare command pools `pools` (newest last), taken out, while they are more than
++/// [`COMMAND_POOLS`]: the one pool a take releases.
++pub(super) fn trim_command_pools(pools: &mut Vec<CommandPool>) -> Option<CommandPool> {
++    (pools.len() > COMMAND_POOLS).then(|| pools.remove(0))
++}
++
+ /// The newest of the spare descriptor pools `pools` (oldest first) with room for one set of
+ /// `needs`, and of at most `most` descriptors where given, taken out.
+ pub(super) fn take_descriptor_pool(

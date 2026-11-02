@@ -1,0 +1,20 @@
+--- a/工具/make-a830-layout.sh
++++ b/工具/make-a830-layout.sh
+@@ -102,12 +102,16 @@
+     # The Control Center module sizes of the iPhone identity (phone-controlcenter-settings.patch): DefaultModuleSettings~iphone.plist
+     # that 工具/make-phone-controlcenter-overlay.py derives from the OS volume's ~ipad one; without it every module is drawn 1x1.
+     # A830_CONTROLCENTER=0 leaves it out.
++    # The peach Wi-Fi firmware pulled from the phone (A830_WIFI_FW=<dir>, build-userspace/a830-inputs/wifi/make-wifi-firmware-seed.md)
++    # to /private/var/ngpu/firmware/wlan of the seed, for PaganiWifi when the files are not on modem_a. Absent: nothing added.
++    WIFI=()
++    [ -n "${A830_WIFI_FW:-}" ] && WIFI=(--wifi-firmware "$A830_WIFI_FW")
+     CONTROLCENTER=()
+     CC_DIR=$TOP/工具/phone-controlcenter-overlay
+     [ "${A830_CONTROLCENTER:-1}" != 0 ] && [ -f "$CC_DIR/DefaultModuleSettings~iphone.plist" ] && CONTROLCENTER=(--controlcenter "$CC_DIR")
+     python3 -B "$TOP/工具/make-phone-seed.py" --gib 2 --disable-jobs com.apple.fairplayd.A2,com.apple.routined \
+         --wallpaper "$TOP/工具/phone-wallpaper-overlay" ${KEYBOARD[@]+"${KEYBOARD[@]}"} ${MIGRATE[@]+"${MIGRATE[@]}"} \
+-        ${DIAG[@]+"${DIAG[@]}"} ${CONTROLCENTER[@]+"${CONTROLCENTER[@]}"} "$BASE_SEED" "$SEED"
++        ${DIAG[@]+"${DIAG[@]}"} ${CONTROLCENTER[@]+"${CONTROLCENTER[@]}"} ${WIFI[@]+"${WIFI[@]}"} "$BASE_SEED" "$SEED"
+     # A830_AUDIO=1: the PaganiAudio audio server plug-in (silent output device until the ADSP path, so the volume HUD and audio
+     # routes exist) added to this seed and its CDHash to a copy of the owner trust bundle (PaganiAudio/scripts/add-pagani-audio-data.py);
+     # the image then takes that bundle and boot-arg pagani-audio=1 (pagani-audio-addon-mount.patch shows it over the HAL directory).

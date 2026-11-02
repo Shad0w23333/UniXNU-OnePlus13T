@@ -1,0 +1,24 @@
+phone-27-gpu-addon-sentinel.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 8 块（kern_exec.c）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关（只跟根卷有关）。
+作用：Extensions 联合视图的下层哨兵从 AGXMetalA10.bundle 换成 24A446（J820 根）上有的 AGXMetalG17G.bundle。
+哨兵不对只影响 stage 数字（停在 3），不影响挂载。
+不移植的第 4、9 块：壁纸层路径和 floating 层。sheng 换成 1032w-1376h 变体是跟它的屏幕和叠加层配套的，见推迟清单。
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+index 2398bc1..06de809 100644
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -9253,7 +9253,7 @@ native_gpu_addon_prepare(proc_t p, user_addr_t scratch)
+ 	static const char extensions_source[] = "/private/var/ngpu/addons", extensions_point[] = "/System/Library/Extensions";
+ 	static const char daemons_source[] = "/private/var/ngpu/daemons", daemons_point[] = "/System/Library/LaunchDaemons";
+ 	native_gpu_addon_mount(p, scratch, 0x400, extensions_source, sizeof(extensions_source), extensions_point,
+-	    sizeof(extensions_point), "/System/Library/Extensions/AGXMetalA10.bundle",
++	    sizeof(extensions_point), "/System/Library/Extensions/AGXMetalG17G.bundle",
+ 	    "/System/Library/Extensions/NativeAdrenoMetal.bundle/Info.plist", &native_gpu_addon_stage,
+ 	    &native_gpu_addon_status);
+ 	native_gpu_addon_mount(p, scratch, 0x600, daemons_source, sizeof(daemons_source), daemons_point, sizeof(daemons_point),

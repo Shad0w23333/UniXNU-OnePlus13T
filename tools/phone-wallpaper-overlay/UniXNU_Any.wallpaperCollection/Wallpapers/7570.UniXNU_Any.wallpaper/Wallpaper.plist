@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>appearanceAware</key>
+	<true/>
+	<key>assets</key>
+	<dict>
+		<key>lockAndHome</key>
+		<dict>
+			<key>default</key>
+			<dict>
+				<key>backgroundAnimationFileName</key>
+				<string>7570.UniXNU_Any_Background.ca</string>
+				<key>identifier</key>
+				<integer>7570</integer>
+				<key>name</key>
+				<string>iPadOS 17</string>
+				<key>type</key>
+				<string>LayeredAnimation</string>
+			</dict>
+		</dict>
+	</dict>
+	<key>contentVersion</key>
+	<real>2.0</real>
+	<key>family</key>
+	<string>iPadOS 17</string>
+	<key>identifier</key>
+	<integer>7570</integer>
+	<key>logicalScreenClass</key>
+	<string>any</string>
+	<key>name</key>
+	<string>iPadOS 17</string>
+	<key>version</key>
+	<integer>1</integer>
+</dict>
+</plist>

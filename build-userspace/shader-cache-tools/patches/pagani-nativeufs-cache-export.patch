@@ -1,0 +1,147 @@
+--- a/drivers/NativeUfs/NativeUfs.cpp	2026-10-30 15:19:36
++++ b/drivers/NativeUfs/NativeUfs.cpp	2026-10-30 15:19:58
+@@ -1240,6 +1240,144 @@
+ extern "C" int native_ufs_log_sync (void)
+ {
+   return gLogRegionBlocks && hostSyncCache () == kIOReturnSuccess;
++}
++
++// ---- The render server's cache export on the 13T (int-147, as sheng's BootLog.c) ------------------------------------------------
++// The Metal plugin in backboardd sends its shader-cache directory as one blob in pieces (drivers/AdrenoMetal/CacheExport.h, method
++// 0x7100 on a hand-off connection; only when NativeAdrenoMetal.cacheexport sits beside the bundle in the Data seed), and the A830
++// driver hands every piece to boot_log_export_put (Adreno830/NativeAdrenoPublish.cpp, a weak no-op until this strong definition).
++// With pagani-cache-export=1 (and sheng-log=1, which opens the window) the pieces go in order into the half of the export region
++// (the 256 MiB below the log window, at the end of the unixnu partition, clear of the root image) that does not hold the last
++// complete blob; once the last piece is written, block 0 of the log window gets a header that names the blob and the cache is
++// flushed. Android reads both back (build-userspace/read-cache-export-a830.py) and the next Data seed carries the files as
++// NativeAdrenoMetal.m2vpack. Nothing else is written. Returns 0, or a negative reason the plugin counts as a refusal (marker 0x69f3).
++namespace {
++struct CacheExportHeader {
++  char magic[8];                   // "PGEXPRT1"
++  uint32_t version, header_bytes;  // 1, sizeof
++  uint64_t log_first_lba;          // absolute LBA of block 0 of the log window (4096-byte blocks)
++  uint32_t log_blocks, export_blocks;
++  uint32_t first, bytes, generation, pieces;   // the newest complete blob: block offset in the export region, length
++  uint64_t uptime_ns;
++  uint32_t crc;                    // CRC-32 (IEEE, reflected) of the bytes before it
++};
++IOLock *volatile gExportLock;
++uint8_t *gExportStage, *gExportHeader;
++int gExportState;   // 0 not tried, 1 open, -1 off or refused
++uint32_t gExportTotal, gExportFilled, gExportGeneration, gExportTarget, gExportReady, gExportReadyBytes, gExportReadyFirst, gExportPieces;
++constexpr uint32_t kExportStageBytes = 256 * 1024;
++
++uint32_t exportCrc32 (const uint8_t *p, size_t n)
++{
++  uint32_t crc = 0xffffffffu;
++  while (n--) {
++    crc ^= *p++;
++    for (int bit = 0; bit < 8; ++bit) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
++  }
++  return ~crc;
++}
++
++IOLock *exportLock (void)
++{
++  if (IOLock *lock = gExportLock) return lock;
++  IOLock *fresh = IOLockAlloc ();
++  if (!fresh) return nullptr;
++  if (!OSCompareAndSwapPtr (nullptr, fresh, (void *volatile *) &gExportLock)) IOLockFree (fresh);
++  return gExportLock;
++}
++
++bool exportOpen (void)
++{
++  if (gExportState) return gExportState > 0;
++  uint32_t on = 0;
++  if (!PE_parse_boot_argn ("pagani-cache-export", &on, sizeof (on)) || on != 1) {
++    gExportState = -1;
++    return false;
++  }
++  uint64_t first = 0, blocks = 0;
++  const char *why = "";
++  if (!gLogRegionBlocks && !native_ufs_log_open (&first, &blocks, &why)) {
++    IOLog ("NativeUfs: cache export refused: %s\n", why);
++    gExportState = -1;
++    return false;
++  }
++  gExportStage = static_cast<uint8_t *> (IOMallocAligned (kExportStageBytes, 4096));
++  gExportHeader = static_cast<uint8_t *> (IOMallocAligned (4096, 4096));
++  if (!gExportStage || !gExportHeader) {
++    gExportState = -1;
++    return false;
++  }
++  gExportState = 1;
++  return true;
++}
++
++int exportWriteHeader (void)
++{
++  CacheExportHeader h;
++  bzero (&h, sizeof (h));
++  memcpy (h.magic, "PGEXPRT1", 8);
++  h.version = 1;
++  h.header_bytes = sizeof (h);
++  h.log_first_lba = gLogRegionFirst;
++  h.log_blocks = static_cast<uint32_t> (gLogRegionBlocks);
++  h.export_blocks = static_cast<uint32_t> (kExportBlocks);
++  h.first = gExportReadyFirst;
++  h.bytes = gExportReadyBytes;
++  h.generation = gExportReady;
++  h.pieces = gExportPieces;
++  uint64_t ns = 0;
++  absolutetime_to_nanoseconds (mach_absolute_time (), &ns);
++  h.uptime_ns = ns;
++  h.crc = exportCrc32 (reinterpret_cast<const uint8_t *> (&h), offsetof (CacheExportHeader, crc));
++  bzero (gExportHeader, 4096);
++  memcpy (gExportHeader, &h, sizeof (h));
++  if (!native_ufs_log_write (0, 1, gExportHeader)) return -8;
++  return native_ufs_log_sync () ? 0 : -9;
++}
++}
++
++extern "C" int boot_log_export_put (uint32_t generation, uint32_t total, uint32_t offset, const void *data, uint32_t size)
++{
++  if (!generation || !total || !data || !size || offset > total || size > total - offset) return -1;
++  IOLock *lock = exportLock ();
++  if (!lock) return -2;
++  IOLockLock (lock);
++  int status = exportOpen () ? 0 : -4;
++  const uint32_t half = static_cast<uint32_t> (kExportBlocks / 2);
++  if (!status && total > static_cast<uint64_t> (half) * 4096) status = -5;
++  if (!status && offset == 0) {
++    gExportGeneration = generation;
++    gExportTotal = total;
++    gExportFilled = 0;
++    gExportTarget = gExportReady && gExportReadyFirst == 0 ? half : 0;   // never over the last complete blob
++  }
++  if (!status && (generation != gExportGeneration || total != gExportTotal || offset != gExportFilled)) status = -3;   // in order only
++  const uint8_t *from = static_cast<const uint8_t *> (data);
++  while (!status && size) {
++    const uint32_t at = gExportFilled % kExportStageBytes, n = size < kExportStageBytes - at ? size : kExportStageBytes - at;
++    memcpy (gExportStage + at, from, n);
++    gExportFilled += n;
++    from += n;
++    size -= n;
++    const bool full = at + n == kExportStageBytes, done = gExportFilled == gExportTotal;
++    if (full || done) {
++      const uint32_t used = at + n, blocks = (used + 4095) / 4096;
++      if (used % 4096) bzero (gExportStage + used, blocks * 4096 - used);
++      if (!native_ufs_export_write (gExportTarget + (gExportFilled - used) / 4096, blocks, gExportStage)) {
++        status = -6;
++        gExportGeneration = 0;   // the next generation starts over
++      }
++    }
++    if (!status && done) {
++      gExportReady = gExportGeneration;
++      gExportReadyBytes = gExportTotal;
++      gExportReadyFirst = gExportTarget;
++      ++gExportPieces;
++      status = exportWriteHeader ();
++    }
++  }
++  IOLockUnlock (lock);
++  return status;
+ }
+ 
+ // Re-read the GPT header and entry array and compare their CRCs with what was recorded at root start. 0 = unchanged.

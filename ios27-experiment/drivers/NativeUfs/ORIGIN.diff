@@ -1,0 +1,1427 @@
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/LICENSE.UniXNU-sheng b/LICENSE.UniXNU-sheng
+--- a/LICENSE.UniXNU-sheng	1969-12-31 16:00:00
++++ b/LICENSE.UniXNU-sheng	2026-11-01 12:44:38
+@@ -0,0 +1,51 @@
++Copyright (c) 2026, UniXNU contributors. All rights reserved.
++
++SPDX-License-Identifier: BSD-2-Clause-Patent
++
++Redistribution and use in source and binary forms, with or without
++modification, are permitted provided that the following conditions are met:
++
++1. Redistributions of source code must retain the above copyright notice,
++   this list of conditions and the following disclaimer.
++
++2. Redistributions in binary form must reproduce the above copyright notice,
++   this list of conditions and the following disclaimer in the documentation
++   and/or other materials provided with the distribution.
++
++Subject to the terms and conditions of this license, each copyright holder
++and contributor hereby grants to those receiving rights under this license
++a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable
++(except for failure to satisfy the conditions of this license) patent
++license to make, have made, use, offer to sell, sell, import, and otherwise
++transfer this software, where such license applies only to those patent
++claims, already acquired or hereafter acquired, licensable by such copyright
++holder or contributor that are necessarily infringed by:
++
++(a) their Contribution(s) (the licensed copyrights of copyright holders and
++    non-copyrightable additions of contributors, in source or binary form)
++    alone; or
++
++(b) combination of their Contribution(s) with the work of authorship to
++    which such Contribution(s) was added by such copyright holder or
++    contributor, if, at the time the Contribution is added, such addition
++    causes such combination to be necessarily infringed. The patent license
++    shall not apply to any other combinations which include the
++    Contribution.
++
++Except as expressly stated above, no rights or licenses from any copyright
++holder or contributor is granted under this license, whether expressly, by
++implication, estoppel or otherwise.
++
++DISCLAIMER
++
++THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
++AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
++IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
++ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDERS OR CONTRIBUTORS BE
++LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++POSSIBILITY OF SUCH DAMAGE.
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/LogInterface.h b/LogInterface.h
+--- a/LogInterface.h	2026-10-31 19:38:41
++++ b/LogInterface.h	2026-11-01 12:08:50
+@@ -38,7 +38,7 @@
+     // One write window covers the export region and the log: [first - kExportBlocks, first + kLogReserveBlocks).
+     const char *refusal = ufsLogOpenWindow (UFS_ROOT_PARTITION, gStoreGeometry.first, gStoreGeometry.last, gStoreGeometry.imageBytes,
+       reserveBlocks (), block, [] (uint64_t lba, uint8_t *to) { return hostRead4k (0, lba, 1, to) == kIOReturnSuccess; },
+-      [] (uint64_t at, uint64_t size) { return hostLogOpen (at, size); }, &first);
++      [] (uint64_t at, uint64_t size) { return hostLogOpen (at, size); }, &first, gStoreGeometry.rootBase);
+     if (refusal) reason = refusal;
+     else {
+       gLogRegionFirst = first;
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/LogWindow.h b/LogWindow.h
+--- a/LogWindow.h	2026-10-31 19:37:56
++++ b/LogWindow.h	2026-11-01 12:15:06
+@@ -16,7 +16,9 @@
+ };
+ 
+ // A window inside the partition, clear of the flashed root image plus a 4 MiB guard. `name` is the partition the root layout came from.
+-static UfsLogPlan ufsLogPlan (const char *name, uint64_t first, uint64_t last, uint64_t imageBytes, uint64_t reserveBlocks)
++// The image starts rootBase blocks into the partition (RootLayout.h), so from the partition's start it takes rootBase blocks more.
++static UfsLogPlan ufsLogPlan (const char *name, uint64_t first, uint64_t last, uint64_t imageBytes, uint64_t reserveBlocks,
++                              uint64_t rootBase = 0)
+ {
+   UfsLogPlan plan = { nullptr, 0, 0 };
+   unsigned index = 0;
+@@ -31,7 +33,8 @@
+   }
+   const uint64_t partition = last - first + 1, imageBlocks = (imageBytes / 4096) + ((imageBytes & 4095) ? 1 : 0);
+   if (reserveBlocks < kLogReserveBlocks + kExportBlocks) plan.refusal = "reserve too small for the log";
+-  else if (reserveBlocks >= partition || partition - reserveBlocks < imageBlocks + 1024) plan.refusal = "overlaps the root image";
++  else if (reserveBlocks >= partition || rootBase > partition - reserveBlocks ||
++           partition - reserveBlocks - rootBase < imageBlocks + 1024) plan.refusal = "overlaps the root image";
+   else {
+     plan.logFirst = last + 1 - kLogReserveBlocks;
+     plan.exportFirst = plan.logFirst - kExportBlocks;
+@@ -39,6 +42,19 @@
+   return plan;
+ }
+ 
++// The Data store's window: `blocks` just below the reserve at the end of the partition, refused unless it is clear of the root image plus
++// a 4 MiB guard, with the image rootBase blocks into the partition as above. Returns the refusal, nullptr with the first LBA in *storeFirst.
++static inline const char *ufsStorePlan (uint64_t first, uint64_t last, uint64_t imageBytes, uint64_t blocks, uint64_t reserve, uint64_t rootBase,
++                                 uint64_t *storeFirst)
++{
++  const uint64_t partition = last - first + 1, imageBlocks = (imageBytes + 4095) / 4096;
++  if (!blocks || reserve >= partition || blocks > partition - reserve) return "size";
++  const uint64_t room = partition - blocks - reserve;
++  if (rootBase > room || room - rootBase < imageBlocks + 1024) return "overlaps the root image";
++  *storeFirst = last + 1 - reserve - blocks;
++  return nullptr;
++}
++
+ // The magics the window's own writer leaves at the start of a block (BootProgress/UfsLog.c, AdrenoMetal CacheExport.h).
+ static bool ufsLogBlockIs (const uint8_t *block, const char *magic)
+ {
+@@ -76,9 +92,9 @@
+ // log. Returns the refusal, nullptr with the log window's first LBA in *logFirst.
+ template <class Read, class Open>
+ static const char *ufsLogOpenWindow (const char *name, uint64_t first, uint64_t last, uint64_t imageBytes, uint64_t reserveBlocks,
+-                                     uint8_t *block, Read &&read, Open &&open, uint64_t *logFirst)
++                                     uint8_t *block, Read &&read, Open &&open, uint64_t *logFirst, uint64_t rootBase = 0)
+ {
+-  const UfsLogPlan plan = ufsLogPlan (name, first, last, imageBytes, reserveBlocks);
++  const UfsLogPlan plan = ufsLogPlan (name, first, last, imageBytes, reserveBlocks, rootBase);
+   if (plan.refusal) return plan.refusal;
+   if (const char *foreign = ufsLogContentGate (plan.logFirst, plan.exportFirst, block, read)) return foreign;
+   if (!open (plan.exportFirst, kExportBlocks + kLogReserveBlocks)) return "window refused";
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/NativeUfs.cpp b/NativeUfs.cpp
+--- a/NativeUfs.cpp	2026-11-01 00:36:40
++++ b/NativeUfs.cpp	2026-11-01 12:43:57
+@@ -10,6 +10,11 @@
+ #include <libkern/crypto/sha2.h>
+ #include <vm/vm_kern.h>
+ #include <vm/vm_map.h>
++/* Newer XNU keeps the kernel memory and map protection interfaces in these headers. */
++#if __has_include(<vm/vm_kern_xnu.h>)
++#include <vm/vm_kern_xnu.h>
++#endif
++#include <mach/mach_vm.h>
+ #include <sys/param.h>
+ #if defined(NATIVE_VERIFIED_BLOCK) && NATIVE_VERIFIED_BLOCK
+ #include "verified_root.h"
+@@ -44,7 +49,13 @@
+ extern "C" {
+ // Optional passive observer; absent in ordinary builds. It may run while a
+ // window lock is held, so its contract forbids blocking or transport access.
++#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
++// The source runtime archive carries a weak no-op definition; a weak
++// reference here would become an unresolved pointer-auth import instead.
++void boot_progress_poll (void);
++#else
+ void boot_progress_poll (void) __attribute__((weak));
++#endif
+ volatile uint32_t native_ufs_probe_calls = 0;
+ volatile uint32_t native_ufs_matched = 0;
+ volatile uint32_t native_ufs_probe_requested = 0;
+@@ -1080,8 +1091,18 @@
+ #include "RootWindowRead.h"
+ #include "RootPublication.h"
+ 
++// pagani-root-base-mib: where the root image starts inside the partition, so that a second system's root can sit beside the first one in
++// the same partition without touching it (27 uses 10240, its slot B 27648). Default 0, the partition's first block. Every path into the
++// image goes through it: the manifest, the windows and data objects, and the log's and the store's overlap checks. In 4096-byte blocks.
++static uint64_t rootBaseBlocks (void)
++{
++  uint32_t mib = 0;
++  if (!PE_parse_boot_argn ("pagani-root-base-mib", &mib, sizeof (mib))) mib = 0;
++  return static_cast<uint64_t> (mib) * 256;
+ }
+ 
++}
++
+ #if !defined(NATIVE_UFS_PROBE_ONLY) || !NATIVE_UFS_PROBE_ONLY
+ // ---- Persistent Data store window (sheng-data-persist) ----------------------------------------------------------
+ // The only part of this driver that ever writes. The consumer (NativeRamBlock's overlay) asks for a window of the given
+@@ -1093,6 +1114,7 @@
+   bool valid;
+   uint64_t first, last, imageBytes, entriesLba;
+   uint32_t headerCrc, entriesCrc, entryCount;
++  uint64_t rootBase;
+ };
+ StoreGeometry gStoreGeometry;
+ uint64_t gStoreRegionFirst, gStoreRegionBlocks;
+@@ -1138,15 +1160,13 @@
+   else if (!gStoreGeometry.valid || !gHost.ready) reason = "no root layout";
+   else if (gStoreRegionBlocks) reason = "already open";
+   else {
+-    uint64_t partition = gStoreGeometry.last - gStoreGeometry.first + 1;
+-    uint64_t imageBlocks = (gStoreGeometry.imageBytes + 4095) / 4096;
+-    const uint64_t reserve = reserveBlocks ();
+-    if (!blocks || reserve >= partition || blocks > partition - reserve) reason = "size";
+-    else if (partition - blocks - reserve < imageBlocks + 1024) reason = "overlaps the root image";
++    // The reserve at the end of the partition belongs to the diagnostic log (its last 32 MiB, with the export region below them);
++    // the store ends just below it.
++    uint64_t first = 0;
++    const char *refusal = ufsStorePlan (gStoreGeometry.first, gStoreGeometry.last, gStoreGeometry.imageBytes, blocks, reserveBlocks (),
++                                        gStoreGeometry.rootBase, &first);
++    if (refusal) reason = refusal;
+     else {
+-      // The reserve at the end of the partition belongs to the diagnostic log (its last 32 MiB, with the export region below them);
+-      // the store ends just below it.
+-      uint64_t first = gStoreGeometry.last + 1 - reserve - blocks;
+       if (storeMode () == 2 && !hostStoreOpen (first, blocks)) reason = "window refused";
+       else {
+         gStoreRegionFirst = first;
+@@ -1244,6 +1264,15 @@
+ };
+ OSDefineMetaClassAndStructors (NativeUfsBlock, IOBlockStorageDevice)
+ 
++#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
++// The source runtime owns registration and attachment after IOStorageFamily
++// has loaded. No second IOKit personality starts this service in that mode.
++extern "C" IOService *native_ufs_source_create (void)
++{
++  return new NativeUfs;
++}
++#endif
++
+ extern "C" {
+ volatile uint32_t native_ufs_blocks_published = 0;
+ volatile uint64_t native_ufs_block_reads = 0;
+@@ -1345,6 +1374,19 @@
+     gRootDiagnostic.stage = "no capacity-matching policy";
+     return false;
+   }
++  // A header-only policy carries its hash table in the root image instead of the boot image.
++  const bool headerOnly = manifestBytes == VR_HEADER_BYTES + VR_SIGNATURE_BYTES;
++  uint64_t hashBytes = 0;
++  if (headerOnly) {
++    uint64_t count = 0;
++    for (unsigned i = 0; i < 8; ++i) count |= static_cast<uint64_t> (manifest[32 + i]) << (8 * i);
++    if (!count || count > (UINT64_MAX - manifestBytes) / 32) {
++      gRootDiagnostic.stage = "policy header block count";
++      return false;
++    }
++    hashBytes = count * 32;
++    manifestBytes += hashBytes;
++  }
+   gRootDiagnostic.stage = "policy storage";
+   vm_size_t tableBytes = round_page (static_cast<vm_size_t> (manifestBytes));
+   if (tableBytes < manifestBytes || tableBytes > UINT64_MAX - 4096) {
+@@ -1357,12 +1399,21 @@
+                   static_cast<kma_flags_t> (KMA_KOBJECT | KMA_DATA), VM_KERN_MEMORY_SECURITY) != KERN_SUCCESS) {
+     return false;
+   }
+-  memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, manifestBytes);
++  if (headerOnly) {
++    memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, VR_HEADER_BYTES + VR_SIGNATURE_BYTES);
++    gRootDiagnostic.stage = "policy table object read";
++    if (!readPolicyTable (label, reinterpret_cast<uint8_t *> (verifiedStorage) + VR_HEADER_BYTES + VR_SIGNATURE_BYTES,
++                          hashBytes)) {
++      return false;
++    }
++  } else {
++    memcpy (reinterpret_cast<void *> (verifiedStorage), manifest, manifestBytes);
++  }
+   uint8_t *key = reinterpret_cast<uint8_t *> (verifiedStorage + tableBytes);
+   memcpy (key, verified_root_key, VR_KEY_BYTES);
+   gRootDiagnostic.stage = "policy read-only protection";
+-  if (vm_map_protect (kernel_map, verifiedStorage, verifiedStorage + verifiedStorageBytes,
+-                      VM_PROT_READ, TRUE) != KERN_SUCCESS) {
++  if (mach_vm_protect (kernel_map, verifiedStorage, verifiedStorageBytes,
++                       TRUE, VM_PROT_READ) != KERN_SUCCESS) {
+     return false;
+   }
+   gRootDiagnostic.stage = "owner signature and hash table";
+@@ -1420,7 +1471,7 @@
+   return true;
+ }
+ 
+-// Called from the root authorization query in NativeVirtioBlock: -1 when `provider` is not a
++// Called from the root authorization query (SourceRootBinding.cpp): -1 when `provider` is not a
+ // UFS window, otherwise 1 if its signed volume UUID equals `uuid`, else 0.
+ extern "C" int native_ufs_block_authenticates (IOService *provider, const char *uuid, uint8_t *digest)
+ {
+@@ -1496,7 +1547,11 @@
+         return kIOReturnNotPrivileged;
+       }
+       __atomic_fetch_add (&native_ufs_verified_blocks, 1, __ATOMIC_RELAXED);
++#if defined(NATIVE_UFS_SOURCE_API) && NATIVE_UFS_SOURCE_API
++      boot_progress_poll ();
++#else
+       if (boot_progress_poll) boot_progress_poll ();
++#endif
+ #else
+       (void) index; (void) data; (void) length;
+ #endif
+@@ -1788,7 +1843,7 @@
+     const char *why = "";
+     if (!hostBringUp (&why)) rootDiagnosticFailure (why);
+     RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
+-    if (!layout || !findRootLayout (layout, &why, UFS_ROOT_PARTITION, gRootLunLast)) {
++    if (!layout || !findRootLayout (layout, &why, UFS_ROOT_PARTITION, gRootLunLast, rootBaseBlocks ())) {
+       panic ("NATIVE_UFS root check: %s", why);
+     }
+     panic ("NATIVE_UFS root check\n"
+@@ -1807,13 +1862,13 @@
+       panic ("NATIVE_UFS root windows: bring-up failed: %s", why);
+     }
+     RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
+-    if (!layout || !findRootLayout (layout, &why, UFS_ROOT_PARTITION, gRootLunLast)) {
++    if (!layout || !findRootLayout (layout, &why, UFS_ROOT_PARTITION, gRootLunLast, rootBaseBlocks ())) {
+       panic ("NATIVE_UFS root windows: %s", why);
+     }
+     uint32_t sig[4][2] = {};
+     uint32_t seen[4] = {};
+     for (uint32_t index = 0; index < layout->windows && index < 4; index++) {
+-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
++      uint64_t absolute = rootAbsolute (*layout, layout->window[index]);
+       if (hostRead4k (0, absolute / 4096, 1, gScratch) == kIOReturnSuccess) {
+         seen[index] = 1;
+         sig[index][0] = le32 (gScratch + 512);
+@@ -1887,7 +1942,7 @@
+   }
+   native_ufs_root_step = 2;
+   RootLayout *layout = static_cast<RootLayout *> (IOMalloc (sizeof (RootLayout)));
+-  if (!layout || !findRootLayout (layout, &why, UFS_ROOT_PARTITION, gRootLunLast)) {
++  if (!layout || !findRootLayout (layout, &why, UFS_ROOT_PARTITION, gRootLunLast, rootBaseBlocks ())) {
+     rootDiagnosticFailure (layout ? why : "root layout allocation failed");
+     IOLog ("NativeUfs: root layout failed: %s\n", why);
+     if (layout) IOFree (layout, sizeof (RootLayout));
+@@ -1902,7 +1957,8 @@
+     return false;
+   }
+   gStoreGeometry = { true, layout->userdataFirst, layout->userdataLast, layout->imageBytes, layout->gptEntriesLba,
+-                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount };
++                     layout->gptHeaderCrc, layout->gptEntriesCrc, layout->gptEntryCount, layout->rootBase };
++  recordRootObjects (*layout);
+   const char *names[4] = {};
+   for (unsigned i = 0; i < layout->windows; ++i) names[i] = layout->window[i].name;
+   if (!ufsBuildRootPlan (names, layout->windows, gPublicationPlan)) {
+@@ -1930,7 +1986,7 @@
+       gPendingDevice[index] = device;
+       gPendingAttached[index] = false;
+       gPendingUuid[index][0] = 0;
+-      uint64_t absolute = layout->userdataFirst * 4096ULL + layout->window[index].offset;
++      uint64_t absolute = rootAbsolute (*layout, layout->window[index]);
+       if (!device || !device->init (static_cast<OSDictionary *> (nullptr)) ||
+           !device->configure (layout->window[index].name, absolute, layout->window[index].size)) return false;
+       gRootDiagnostic.stage = "root window attachment";
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/README.md b/README.md
+--- a/README.md	2026-11-01 07:15:15
++++ b/README.md	2026-11-01 12:43:57
+@@ -6,6 +6,18 @@
+ 
+ Linked into XNU by `unixnu build kernel`.
+ 
++iPadOS 27 copy (xnu-12377, arm64e): built with `NATIVE_UFS_SOURCE_API=1`, `NATIVE_VERIFIED_POLICY_HANDOFF=1` and the `Source*.cpp` from UniXNU-sheng.
++`make-source-base.py` turns the public `IOBlockStorageDevice.cpp` into the kernel's copy; `SourceStorage.cpp` loads the original IOStorageFamily and
++APFS, registers the classes and starts this driver from `bsd_init` (no IOKit personality). The root policies come from the loader
++(`/chosen/memory-map/RootPolicies`, `SourceRootPolicies.cpp`); a header-only policy reads its hash table from the data object `<window>.vroot` of a
++version 2 manifest (flags 3, 4096-byte blocks; `readPolicyTable`).
++
++Root base (`pagani-root-base-mib`, default 0, 27 uses 10240, its slot B 27648): the root image starts that far into the partition, so that a second
++system's root sits beside the first one. The manifest, the windows and the data objects hang off `rootImageFirst`, and everything below the image
++counts as taken in the log's and the store's overlap checks (`ufsLogPlan`, `ufsStorePlan`). A base outside the partition is refused and a base with no
++manifest behind it publishes nothing: it never falls back to the partition's start. Base 0 is the mainline's behaviour for a version 1 manifest.
++Tests: `tests/RootBase.cpp`, and `tests/RootBaseMainline.cpp` (`check_root_path_host.py --mainline DIR`), which compares base 0 with the mainline's headers.
++
+ Solid state: `declareSolidState` (here and in NativeRamBlock, before `registerService`) sets `Medium Type` = `Solid State` in the device's
+ `Device Characteristics`. `IOBlockStorageDriver::handleStart` reads it from its provider and `DKIOCISSOLIDSTATE` from the parents of the
+ media, an APFS volume's too; the answer sets `MNTK_SSD` and the device's throttle table. All it changes on iOS, as read in XNU and not
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/RootLayout.h b/RootLayout.h
+--- a/RootLayout.h	2026-10-29 10:38:54
++++ b/RootLayout.h	2026-11-01 12:11:11
+@@ -4,18 +4,21 @@
+ // ---- LUN 0 GPT and the root-image manifest -------------------------------------------------
+ struct RootWindow {
+   char name[32];
+-  uint64_t offset;   // bytes from the start of the userdata partition
++  uint64_t offset;   // bytes from the start of the root image (rootImageFirst)
+   uint64_t size;     // bytes
+   uint8_t sha256[32];
+ };
+ 
+ struct RootLayout {
+   uint64_t userdataFirst, userdataLast;   // 4096-byte LBAs on LUN 0
++  uint64_t rootBase;                      // 4096-byte blocks from the partition's first block to the root image and its manifest
+   uint64_t imageBytes;                    // size of the flashed root image from the manifest (0 when none)
+   uint64_t gptEntriesLba;                 // GPT facts recorded for the persistent store's before/after comparison
+   uint32_t gptHeaderCrc, gptEntriesCrc, gptEntryCount;
+   uint32_t windows;
+   RootWindow window[4];
++  uint32_t objects;                       // version 2: data the kernel reads itself (policy tables, firmware)
++  RootWindow object[4];
+   uint32_t manifestStatus;                // 0 ok, 1 no manifest magic, 2 bad version/count, 3 hash, 4 bounds, 5 names, 6 overlap, 7 attributes
+   uint32_t magic0, magic1;                // first 8 bytes of the partition's first block
+   uint32_t ext4Magic;                     // 16 bits at byte 1080 of the partition (0xef53 on Linux ext4)
+@@ -54,10 +57,24 @@
+   return used != 0;
+ }
+ 
++// Where the root image starts: rootBase blocks into the partition, its manifest in that block, every offset of the manifest
++// relative to it. With rootBase 0 that is the partition's first block.
++static inline uint64_t rootImageFirst (const RootLayout &layout)
++{
++  return layout.userdataFirst + layout.rootBase;
++}
++
++// The byte offset on LUN 0 of a window or data object of `layout`.
++static inline uint64_t rootAbsolute (const RootLayout &layout, const RootWindow &item)
++{
++  return rootImageFirst (layout) * 4096ULL + item.offset;
++}
++
+ // Find the exact selected name in LUN 0's primary GPT (4096-byte sectors), then read the
+-// manifest at its first block. Read-only. Returns false only if the GPT itself is unusable.
++// manifest rootBase blocks into it (its first block by default). Read-only. Returns false only if the GPT itself is unusable or the
++// base lies outside the partition: a base never falls back to the partition's start, where another system's image can sit.
+ static bool findRootLayout (RootLayout *layout, const char **why, const char *wanted = "userdata",
+-                            uint64_t lastLba = UINT32_MAX)
++                            uint64_t lastLba = UINT32_MAX, uint64_t rootBase = 0)
+ {
+   gRootDiagnostic.stage = "GPT header";
+   bzero (layout, sizeof (*layout));
+@@ -149,8 +166,13 @@
+   gRootDiagnostic.first = layout->userdataFirst;
+   gRootDiagnostic.last = layout->userdataLast;
+   gRootDiagnostic.stage = "root manifest";
+-  // First block of the partition: manifest if the root image was flashed, ext4 otherwise.
+-  if (hostRead4k (0, layout->userdataFirst, 1, gScratch) != kIOReturnSuccess) {
++  if (rootBase >= layout->userdataLast - layout->userdataFirst + 1) {
++    *why = "root base outside the partition";
++    return false;
++  }
++  layout->rootBase = rootBase;
++  // First block of the root image: manifest if the root image was flashed, ext4 otherwise.
++  if (hostRead4k (0, rootImageFirst (*layout), 1, gScratch) != kIOReturnSuccess) {
+     *why = "root partition first block read";
+     return false;
+   }
+@@ -163,7 +185,9 @@
+     uint32_t version = le32 (gScratch + 8), n = le32 (gScratch + 12);
+     uint64_t imageBytes = le64 (gScratch + 16);
+     layout->manifestStatus = 2;
+-    if (version == 1 && n && n <= 4) {
++    // Version 1 holds windows only. Version 2 adds data objects (flags 3, 4096-byte blocks), which are read
++    // by the kernel and never published as block devices; a version 1 parser refuses such a manifest.
++    if ((version == 1 && n && n <= 4) || (version == 2 && n && n <= 8)) {
+       SHA256_CTX context;
+       uint8_t digest[32];
+       SHA256_Init (&context);
+@@ -171,18 +195,21 @@
+       SHA256_Final (digest, &context);
+       layout->manifestStatus = 3;
+       if (memcmp (digest, gScratch + 4064, 32) == 0) {
+-        uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1) * 4096ULL;
++        // What the partition holds from the base on.
++        uint64_t partitionBytes = (layout->userdataLast - layout->userdataFirst + 1 - rootBase) * 4096ULL;
+         layout->manifestStatus = 4;
+         bool bounds = imageBytes >= 4096 && !(imageBytes & 4095) && imageBytes <= partitionBytes;
+         for (uint32_t index = 0; index < n && bounds; index++) {
+           const uint8_t *entry = gScratch + 24 + 128 * index;
+           uint64_t offset = le64 (entry + 32), size = le64 (entry + 40);
+-          if ((offset & 4095) || offset < 4096 || (size & 511) || !size || offset >= imageBytes ||
++          const bool isWindow = le32 (entry + 48) == 512 && le32 (entry + 52) == 1;
++          const bool isObject = version == 2 && le32 (entry + 48) == 4096 && le32 (entry + 52) == 3;
++          if ((offset & 4095) || offset < 4096 || ((version == 1 || isWindow) && (size & 511)) || !size || offset >= imageBytes ||
+               size > imageBytes - offset || ((size + 4095) & ~4095ULL) > imageBytes - offset) {
+             bounds = false;
+             break;
+           }
+-          if (le32 (entry + 48) != 512 || le32 (entry + 52) != 1) {
++          if ((!isWindow && !isObject) || (isWindow && layout->windows == 4) || (isObject && layout->objects == 4)) {
+             layout->manifestStatus = 7; bounds = false; break;
+           }
+           unsigned length = 0;
+@@ -190,8 +217,8 @@
+           if (!length || length == 32 || entry[length] != 0) {
+             layout->manifestStatus = 5; bounds = false; break;
+           }
+-          for (uint32_t prior = 0; prior < index; ++prior) {
+-            const RootWindow &other = layout->window[prior];
++          for (uint32_t prior = 0; prior < layout->windows + layout->objects; ++prior) {
++            const RootWindow &other = prior < layout->windows ? layout->window[prior] : layout->object[prior - layout->windows];
+             if (!strcmp (reinterpret_cast<const char *> (entry), other.name)) {
+               layout->manifestStatus = 5; bounds = false; break;
+             }
+@@ -202,16 +229,22 @@
+             }
+           }
+           if (!bounds) break;
+-          memcpy (layout->window[index].name, entry, 32);
+-          layout->window[index].name[31] = 0;
+-          layout->window[index].offset = offset;
+-          layout->window[index].size = size;
+-          memcpy (layout->window[index].sha256, entry + 56, 32);
++          RootWindow &slot = isWindow ? layout->window[layout->windows++] : layout->object[layout->objects++];
++          memcpy (slot.name, entry, 32);
++          slot.name[31] = 0;
++          slot.offset = offset;
++          slot.size = size;
++          memcpy (slot.sha256, entry + 56, 32);
+         }
++        if (bounds && !layout->windows) {
++          layout->manifestStatus = 7;
++          bounds = false;
++        }
+         if (bounds) {
+-          layout->windows = n;
+           layout->imageBytes = imageBytes;
+           layout->manifestStatus = 0;
++        } else {
++          layout->windows = layout->objects = 0;
+         }
+       }
+     }
+@@ -220,5 +253,40 @@
+   gRootDiagnostic.magic1 = layout->magic1;
+   gRootDiagnostic.manifest = layout->manifestStatus;
+   gRootDiagnostic.windows = layout->windows;
++  return true;
++}
++
++// Data objects of the root image (version 2 manifest), recorded by startRoot before windows are configured.
++static RootWindow gRootObject[4];
++static uint32_t gRootObjects;
++static uint64_t gRootObjectBase;
++
++static inline void recordRootObjects (const RootLayout &layout)
++{
++  gRootObjects = layout.objects;
++  for (unsigned i = 0; i < layout.objects; ++i) gRootObject[i] = layout.object[i];
++  gRootObjectBase = rootImageFirst (layout) * 4096ULL;
++}
++
++// Read the hash table of a header-only policy from the root image object "<window>.vroot" into `table`.
++// The bytes are untrusted here; vr_open checks them against the digest in the signed header.
++static inline bool readPolicyTable (const char *window, uint8_t *table, uint64_t tableBytes)
++{
++  char name[32];
++  if (snprintf (name, sizeof (name), "%s.vroot", window) >= static_cast<int> (sizeof (name))) return false;
++  const RootWindow *object = nullptr;
++  for (unsigned i = 0; i < gRootObjects; ++i)
++    if (!strcmp (gRootObject[i].name, name)) object = &gRootObject[i];
++  if (!object || object->size != tableBytes) return false;
++  uint64_t lba = (gRootObjectBase + object->offset) / 4096, done = 0;
++  while (done < tableBytes) {
++    uint64_t left = tableBytes - done;
++    uint32_t blocks = static_cast<uint32_t> (left >= kDataMax ? kDataMax / 4096 : (left + 4095) / 4096);
++    if (hostRead4k (0, lba, blocks, gScratch) != kIOReturnSuccess) return false;
++    uint64_t take = left < blocks * 4096ULL ? left : blocks * 4096ULL;
++    memcpy (table + done, gScratch, take);
++    done += take;
++    lba += blocks;
++  }
+   return true;
+ }
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/SourceRootBinding.cpp b/SourceRootBinding.cpp
+--- a/SourceRootBinding.cpp	1969-12-31 16:00:00
++++ b/SourceRootBinding.cpp	2026-11-01 12:22:30
+@@ -0,0 +1,122 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// Ported from UniXNU-sheng package/SourceRootBinding.cpp (6b11bb5e40aabc75545a3dac87a92dbfde52c806), Copyright (c) 2026, UniXNU contributors.
++// Bind a mounted BSD device to an owner-verified UFS root window.
++//
++// The owner-root kernel patches ask these queries after mounting: the device
++// must be the BSD node of exactly one IOMedia whose provider chain reaches a
++// NativeUfs window that verified the media's volume UUID.
++#include <IOKit/IOService.h>
++#include <IOKit/IOBSD.h>
++#include <libkern/c++/OSDictionary.h>
++#include <libkern/c++/OSIterator.h>
++#include <libkern/c++/OSNumber.h>
++#include <libkern/c++/OSString.h>
++#include <sys/types.h>
++#include <sys/param.h>
++
++extern "C" {
++int native_ufs_block_authenticates(IOService *provider, const char *uuid, uint8_t *digest);
++int native_verified_block_root_authorized(dev_t device);
++int native_verified_block_manifest_sha384(dev_t device, const char *uuid, uint8_t digest[48]);
++int native_verified_block_volume_device(const char *uuid, dev_t *device, char *path, size_t size);
++}
++
++static constexpr size_t kDigestBytes = 48;
++
++// 1 when `device` is the only IOMedia with that BSD number and a UFS window
++// below it authenticates the media UUID (and `expectedUUID`, when given).
++static int verifiedVolumeQuery(dev_t device, const char *expectedUUID, uint8_t *manifestDigest)
++{
++    OSDictionary *matching = IOService::serviceMatching("IOMedia");
++    OSDictionary *properties = OSDictionary::withCapacity(2);
++    OSNumber *mjr = OSNumber::withNumber(static_cast<unsigned>(major(static_cast<uint32_t>(device))), 32);
++    OSNumber *mnr = OSNumber::withNumber(static_cast<unsigned>(minor(static_cast<uint32_t>(device))), 32);
++    bool ready = matching && properties && mjr && mnr &&
++                 properties->setObject(kIOBSDMajorKey, mjr) && properties->setObject(kIOBSDMinorKey, mnr) &&
++                 matching->setObject("IOPropertyMatch", properties);
++    OSSafeReleaseNULL(mnr);
++    OSSafeReleaseNULL(mjr);
++    OSSafeReleaseNULL(properties);
++    OSIterator *iterator = ready ? IOService::getMatchingServices(matching) : nullptr;
++    OSSafeReleaseNULL(matching);
++    if (!iterator) return 0;
++    bool authenticated = false;
++    unsigned matches = 0;
++    while (OSObject *object = iterator->getNextObject()) {
++        IOService *media = OSDynamicCast(IOService, object);
++        if (!media) continue;
++        if (++matches != 1) { authenticated = false; break; }
++        OSString *uuid = OSDynamicCast(OSString, media->getProperty("UUID"));
++        if (!uuid || uuid->getLength() != 36 ||
++            (expectedUUID && strcmp(expectedUUID, uuid->getCStringNoCopy()))) continue;
++        unsigned depth = 0;
++        for (IOService *provider = media; provider && depth < 64; provider = provider->getProvider(), ++depth) {
++            const int ufs = native_ufs_block_authenticates(provider, uuid->getCStringNoCopy(), manifestDigest);
++            if (ufs >= 0) {
++                authenticated = ufs == 1;
++                break;
++            }
++        }
++    }
++    iterator->release();
++    if (!authenticated || matches != 1) {
++        if (manifestDigest) bzero(manifestDigest, kDigestBytes);
++        return 0;
++    }
++    return 1;
++}
++
++extern "C" int native_verified_block_root_authorized(dev_t device)
++{
++    return verifiedVolumeQuery(device, nullptr, nullptr);
++}
++
++extern "C" int native_verified_block_manifest_sha384(dev_t device, const char *uuid, uint8_t digest[48])
++{
++    if (!digest) return 0;
++    bzero(digest, kDigestBytes);
++    if (!uuid || strlen(uuid) != 36) return 0;
++    return verifiedVolumeQuery(device, uuid, digest);
++}
++
++extern "C" int native_verified_block_volume_device(const char *uuid, dev_t *device, char *path, size_t size)
++{
++    if (!uuid || !device || !path || size < 6 || strlen(uuid) != 36) return 0;
++    *device = NODEV;
++    path[0] = 0;
++    OSDictionary *matching = IOService::serviceMatching("IOMedia");
++    OSDictionary *properties = OSDictionary::withCapacity(1);
++    OSString *wanted = OSString::withCString(uuid);
++    bool ready = matching && properties && wanted && properties->setObject("UUID", wanted) &&
++                 matching->setObject("IOPropertyMatch", properties);
++    OSSafeReleaseNULL(wanted);
++    OSSafeReleaseNULL(properties);
++    OSIterator *iterator = ready ? IOService::getMatchingServices(matching) : nullptr;
++    OSSafeReleaseNULL(matching);
++    if (!iterator) return 0;
++    unsigned matches = 0;
++    bool authenticated = false;
++    dev_t candidate = NODEV;
++    char candidatePath[64] = {};
++    while (OSObject *object = iterator->getNextObject()) {
++        IOService *media = OSDynamicCast(IOService, object);
++        if (!media) continue;
++        if (++matches != 1) { authenticated = false; break; }
++        OSString *identity = OSDynamicCast(OSString, media->getProperty("UUID"));
++        OSString *name = OSDynamicCast(OSString, media->getProperty(kIOBSDNameKey));
++        OSNumber *mjr = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMajorKey));
++        OSNumber *mnr = OSDynamicCast(OSNumber, media->getProperty(kIOBSDMinorKey));
++        if (!identity || strcmp(identity->getCStringNoCopy(), uuid) || !name || !mjr || !mnr ||
++            !name->getLength() || name->getLength() >= sizeof(candidatePath) - 6 || name->getLength() >= size - 6 ||
++            mjr->unsigned64BitValue() > 255 || mnr->unsigned64BitValue() > 0xffffff) continue;
++        candidate = static_cast<dev_t>(makedev(mjr->unsigned32BitValue(), mnr->unsigned32BitValue()));
++        if (!native_verified_block_root_authorized(candidate)) continue;
++        snprintf(candidatePath, sizeof(candidatePath), "/dev/%s", name->getCStringNoCopy());
++        authenticated = true;
++    }
++    iterator->release();
++    if (!authenticated || matches != 1) return 0;
++    *device = candidate;
++    strlcpy(path, candidatePath, size);
++    return 1;
++}
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/SourceRootPolicies.cpp b/SourceRootPolicies.cpp
+--- a/SourceRootPolicies.cpp	1969-12-31 16:00:00
++++ b/SourceRootPolicies.cpp	2026-11-01 12:22:30
+@@ -0,0 +1,86 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// Ported from UniXNU-sheng package/SourceRootPolicies.cpp (6b11bb5e40aabc75545a3dac87a92dbfde52c806), Copyright (c) 2026, UniXNU contributors.
++// Authenticate the firmware's root-policy sidecar with a compiled-in owner key.
++#include <IOKit/IOService.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <IOKit/IOMemoryDescriptor.h>
++#include <IOKit/IOLib.h>
++#include <libkern/c++/OSData.h>
++#include <vm/vm_kern.h>
++#include <vm/vm_map.h>
++#include <vm/vm_kern_xnu.h>
++#include <mach/mach_vm.h>
++#include "verified_root.h"
++#include "VerifiedBlockPolicy.h"
++
++extern "C" {
++extern const uint8_t verified_root_key[];
++extern const struct vr_crypto vr_xnu_crypto;
++NativeVerifiedBlockPolicy verified_root_policies[16];
++uint64_t verified_root_policy_count;
++}
++
++static uint64_t read64(const uint8_t *p)
++{
++    uint64_t n = 0;
++    for (unsigned i = 0; i != 8; ++i) n |= uint64_t(p[i]) << (i * 8);
++    return n;
++}
++
++extern "C" bool native_source_root_policies_load(void)
++{
++    if (verified_root_policy_count) return true;
++    IORegistryEntry *entry = IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane);
++    if (!entry) return false;
++    OSData *property = OSDynamicCast(OSData, entry->getProperty("RootPolicies"));
++    uint64_t physical = 0, length = 0;
++    if (property && property->getLength() == 16) {
++        const auto *data = static_cast<const uint8_t *>(property->getBytesNoCopy());
++        physical = read64(data);
++        length = read64(data + 8);
++    }
++    entry->release();
++    if (!physical || (physical & 4095) || length < 32 || length > 128ULL * 1024 * 1024 ||
++        physical > UINT64_MAX - length) return false;
++    IOMemoryDescriptor *descriptor = IOMemoryDescriptor::withPhysicalAddress(physical, length, kIODirectionIn);
++    if (!descriptor) return false;
++    IOMemoryMap *mapping = descriptor->map();
++    if (!mapping) { descriptor->release(); return false; }
++    vm_offset_t allocation = 0;
++    const vm_size_t allocationBytes = round_page(static_cast<vm_size_t>(length));
++    const kern_return_t allocated = kmem_alloc(kernel_map, &allocation, allocationBytes,
++        static_cast<kma_flags_t>(KMA_KOBJECT | KMA_DATA), VM_KERN_MEMORY_SECURITY);
++    if (allocated == KERN_SUCCESS)
++        memcpy(reinterpret_cast<void *>(allocation), reinterpret_cast<const void *>(mapping->getVirtualAddress()), length);
++    mapping->release();
++    descriptor->release();
++    if (allocated != KERN_SUCCESS) return false;
++    // Protect the copied bytes before authenticating; later firmware or source
++    // mappings cannot alter the data from which we publish policy pointers.
++    if (mach_vm_protect(kernel_map, allocation, allocationBytes, TRUE, VM_PROT_READ) != KERN_SUCCESS)
++        return false;
++    const auto *bytes = reinterpret_cast<const uint8_t *>(allocation);
++    if (memcmp(bytes, "VROOTB01", 8) || read64(bytes + 8) != 1 || read64(bytes + 24) != length)
++        return false;
++    const uint64_t count = read64(bytes + 16);
++    if (!count || count > 16 || 32 + count * 16 > length) return false;
++    uint64_t cursor = 32 + count * 16;
++    for (uint64_t i = 0; i != count; ++i) {
++        const uint64_t offset = read64(bytes + 32 + i * 16);
++        const uint64_t size = read64(bytes + 40 + i * 16);
++        if (offset != cursor || size < VR_HEADER_BYTES + VR_SIGNATURE_BYTES || size > length - cursor)
++            return false;
++        // A policy is either the whole envelope or only its signed header, whose hash table
++        // is a userdata object that NativeUfs reads and checks against the signed digest.
++        struct vr_view view = {};
++        const bool headerOnly = size == VR_HEADER_BYTES + VR_SIGNATURE_BYTES;
++        if ((headerOnly ? vr_open_header(bytes + offset, size, verified_root_key, 1, &vr_xnu_crypto, &view) :
++                          vr_open(bytes + offset, size, verified_root_key, 1, &vr_xnu_crypto, &view)) != VR_OK)
++            return false;
++        verified_root_policies[i] = {bytes + offset, size};
++        cursor += size;
++    }
++    if (cursor != length) return false;
++    verified_root_policy_count = count;
++    return true;
++}
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/SourceStorage.cpp b/SourceStorage.cpp
+--- a/SourceStorage.cpp	1969-12-31 16:00:00
++++ b/SourceStorage.cpp	2026-11-01 12:32:01
+@@ -0,0 +1,104 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// Ported from UniXNU-sheng package/SourceStorage.cpp (6b11bb5e40aabc75545a3dac87a92dbfde52c806), Copyright (c) 2026, UniXNU contributors.
++// Start the source-built UFS adapter after the original storage family loads.
++#include <IOKit/IOService.h>
++#include <IOKit/IOPlatformExpert.h>
++#include <IOKit/IODeviceTreeSupport.h>
++#include <IOKit/storage/IOBlockStorageDevice.h>
++#include <libkern/OSKextLib.h>
++#include <mach/kmod.h>
++#include <pexpert/pexpert.h>
++#include <IOKit/IOLib.h>
++
++extern kmod_info_t g_kernel_kmod_info;
++extern "C" void source_storage_base_init(void) __asm__("__GLOBAL__sub_I_IOBlockStorageDevice.cpp");
++extern "C" void source_storage_ufs_init(void) __asm__("__GLOBAL__sub_I_NativeUfs.cpp");
++extern "C" void source_storage_ram_init(void) __asm__("__GLOBAL__sub_I_NativeRamBlock.cpp");
++extern "C" IOService *native_ufs_source_create(void);
++extern "C" bool native_source_root_policies_load(void);
++// NativeUfs records how far root start got and the last soft-failure reason.
++extern "C" volatile uint32_t native_ufs_root_step;
++extern "C" const char *volatile native_ufs_root_failure;
++
++// NativeUfs polls the optional board diagnostic during window reads. The
++// minimal kernel does not include it; a weak definition keeps the archive
++// linkable and is replaced when the diagnostic component is built in.
++extern "C" __attribute__((weak)) void boot_progress_poll(void) {}
++// Starts NativeKeyStoreEvents (KeyStoreProbe.cpp) on a kernel without the display stack; one with it does that from its late probe and
++// does not link KeyStoreProbe.cpp, so this stays a no-op.
++extern "C" __attribute__((weak)) void native_keystore_probe(void) {}
++static const OSMetaClass *storageParent;
++static IOService *storageDriver;
++static bool attempted;
++
++// Used only by the deferred source IOBlockStorageDevice metaclass constructor.
++// The C++ class name stays unchanged for compiler-authored arm64e discriminators.
++extern "C" const OSMetaClass *native_source_storage_parent(void)
++{
++    if (!storageParent) panic("SourceStorage: metaclass initialized before original family");
++    return storageParent;
++}
++
++// The Data seed the loader placed in /chosen/memory-map. Its disk starts after UFS, whose store window
++// keeps the changed pages of the seed when the board enables persistence.
++static void start_data_disk(IOService *provider)
++{
++    IORegistryEntry *map = IORegistryEntry::fromPath("/chosen/memory-map", gIODTPlane);
++    const bool seed = map && (map->getProperty("PackedRAMDisk") || map->getProperty("RAMDisk"));
++    OSSafeReleaseNULL(map);
++    if (!seed) return;
++    IOService *disk = OSDynamicCast(IOService, OSMetaClass::allocClassWithName("NativeRamBlock"));
++    if (!disk) panic("SourceStorage: cannot allocate the Data disk");
++    const char *step = !disk->init() ? "init" : !disk->attach(provider) ? "attach" : !disk->start(provider) ? "start" : nullptr;
++    if (step) panic("SourceStorage: Data disk %s failed", step);
++    printf("SourceStorage: Data disk started\n");
++}
++
++extern "C" void native_source_storage_start(void)
++{
++    unsigned enabled = 0;
++    if (!PE_parse_boot_argn("native-source-storage", &enabled, sizeof(enabled)) || enabled != 1 || attempted)
++        return;
++    attempted = true;
++    OSReturn status = OSKextLoadKextWithIdentifier("com.apple.iokit.IOStorageFamily");
++    if (status != kOSReturnSuccess)
++        panic("SourceStorage: IOStorageFamily load failed %x", status);
++    const OSSymbol *name = OSSymbol::withCString("IOBlockStorageDevice");
++    storageParent = name ? OSMetaClass::getMetaClassWithName(name) : nullptr;
++    if (name) name->release();
++    if (!storageParent || storageParent->getClassSize() != sizeof(IOBlockStorageDevice))
++        panic("SourceStorage: original base layout %u differs from source %lu",
++              storageParent ? storageParent->getClassSize() : 0, sizeof(IOBlockStorageDevice));
++
++    // Authenticate policies before registering hardware-facing classes. The
++    // firmware hands off the envelope; the trusted anchor is compiled in.
++    if (!native_source_root_policies_load())
++        panic("SourceStorage: root policy handoff or authentication failed");
++    status = OSKextLoadKextWithIdentifier("com.apple.filesystems.apfs");
++    if (status != kOSReturnSuccess)
++        panic("SourceStorage: APFS load failed %x", status);
++    void *handle = OSMetaClass::preModLoad(g_kernel_kmod_info.name);
++    if (!handle) panic("SourceStorage: cannot begin class registration");
++    source_storage_base_init();
++    source_storage_ufs_init();
++    source_storage_ram_init();
++    status = OSMetaClass::postModLoad(handle);
++    if (status != kOSReturnSuccess)
++        panic("SourceStorage: class registration failed %x", status);
++
++    OSDictionary *matching = IOService::serviceMatching("IOPlatformExpertDevice");
++    IOService *provider = matching ? IOService::waitForMatchingService(matching, 5000000000ULL) : nullptr;
++    if (!provider) panic("SourceStorage: platform root unavailable");
++    storageDriver = native_ufs_source_create();
++    if (!storageDriver) panic("SourceStorage: cannot allocate UFS service");
++    const char *step = !storageDriver->init() ? "init" : !storageDriver->attach(provider) ? "attach" :
++                       !storageDriver->start(provider) ? "start" : nullptr;
++    if (step)
++        panic("SourceStorage: UFS %s failed (root step %u: %s)", step, native_ufs_root_step,
++              native_ufs_root_failure ? native_ufs_root_failure : "no reason recorded");
++    printf("SourceStorage: UFS started through public IOStorageFamily interface\n");
++    start_data_disk(provider);
++    // The UFS log area exists from here on. BootProgress's writer (UfsLog.c, sheng-log=1) has been asking for it since boot_progress_start:
++    // until startRoot has read the root layout its open is refused with "no root layout", and it tries again every second.
++    native_keystore_probe();
++}
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/VerifiedBlockPolicy.h b/VerifiedBlockPolicy.h
+--- a/VerifiedBlockPolicy.h	1969-12-31 16:00:00
++++ b/VerifiedBlockPolicy.h	2026-11-01 12:08:50
+@@ -0,0 +1,19 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++#ifndef NATIVE_VERIFIED_BLOCK_POLICY_H
++#define NATIVE_VERIFIED_BLOCK_POLICY_H
++#include <stdint.h>
++struct NativeVerifiedBlockPolicy {
++  const uint8_t *manifest;
++  uint64_t manifestBytes;
++};
++static_assert(sizeof(NativeVerifiedBlockPolicy) == 16 && alignof(NativeVerifiedBlockPolicy) == 8);
++extern "C" {
++#if defined(NATIVE_VERIFIED_POLICY_HANDOFF) && NATIVE_VERIFIED_POLICY_HANDOFF
++extern NativeVerifiedBlockPolicy verified_root_policies[];
++extern uint64_t verified_root_policy_count;
++#else
++extern const NativeVerifiedBlockPolicy verified_root_policies[];
++extern const uint64_t verified_root_policy_count;
++#endif
++}
++#endif
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/make-source-base.py b/make-source-base.py
+--- a/make-source-base.py	1969-12-31 16:00:00
++++ b/make-source-base.py	2026-11-01 12:23:29
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++# SPDX-License-Identifier: BSD-2-Clause-Patent
++# Ported from UniXNU scripts/build-sheng-source-storage.py (407db1aefd4e4e50a944fcda73442bde566dbce1, lines 152-165), Copyright (c) 2026, UniXNU contributors.
++"""Write the kernel's copy of the public IOBlockStorageDevice.cpp: the C++ class name stays, for the compiler's arm64e discriminators, and the
++metaclass registers as UniXNUBlockStorageDevice under the original family's class, which SourceStorage.cpp resolves first."""
++import argparse
++from pathlib import Path
++
++parser = argparse.ArgumentParser(description=__doc__)
++parser.add_argument('source', type=Path, help='IOBlockStorageDevice.cpp of the pinned IOStorageFamily')
++parser.add_argument('output', type=Path)
++args = parser.parse_args()
++original = args.source.read_text()
++macro = 'OSDefineMetaClassAndAbstractStructors(IOBlockStorageDevice,IOService)'
++if original.count(macro) != 1:
++    parser.error('Pinned IOBlockStorageDevice registration macro changed')
++args.output.write_text(original.replace(macro, '''
++extern "C" const OSMetaClass *native_source_storage_parent(void);
++OSDefineMetaClassWithInit(IOBlockStorageDevice, IOService, )
++IOBlockStorageDevice::MetaClass::MetaClass()
++    : OSMetaClass("UniXNUBlockStorageDevice", native_source_storage_parent(), sizeof(IOBlockStorageDevice)) {}
++OSDefineAbstractStructors(IOBlockStorageDevice, IOService)
++OSDefineOperatorMethods(IOBlockStorageDevice)
++'''))
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/tests/LogInterface.cpp b/tests/LogInterface.cpp
+--- a/tests/LogInterface.cpp	2026-10-31 19:51:09
++++ b/tests/LogInterface.cpp	2026-11-01 12:11:11
+@@ -22,7 +22,7 @@
+ }
+ 
+ // What NativeUfs.cpp has ready for LogInterface.h.
+-struct StoreGeometry { bool valid; uint64_t first,last,imageBytes,entriesLba; uint32_t headerCrc,entriesCrc,entryCount; };
++struct StoreGeometry { bool valid; uint64_t first,last,imageBytes,entriesLba; uint32_t headerCrc,entriesCrc,entryCount; uint64_t rootBase; };
+ static StoreGeometry gStoreGeometry;
+ static uint64_t gReserve;
+ static uint64_t reserveBlocks() { return gReserve; }
+@@ -62,7 +62,7 @@
+   put32(header.data()+88,entriesCrc);
+   const uint32_t headerCrc=rootCrc32(header.data(),92,true);
+   put32(header.data()+16,headerCrc);
+-  gStoreGeometry={true,kUnixnuFirst,kUnixnuLast,0x22F400000,2,headerCrc,entriesCrc,128};
++  gStoreGeometry={true,kUnixnuFirst,kUnixnuLast,0x22F400000,2,headerCrc,entriesCrc,128,0};
+ }
+ 
+ // Everything that reached the medium in a run lies in the window, or is the GPT this test wrote.
+@@ -87,6 +87,11 @@
+   assert(!gLogOpen && !native_ufs_export_blocks() && synced==0 && writes==0);
+   fresh(); gReserve=0;
+   assert(!native_ufs_log_open(&first,&blocks,&why) && !strcmp(why,"reserve too small for the log"));
++  // The same image further into the partition: the base counts towards the overlap (LogWindow.h), and a base that leaves room opens.
++  fresh(); gStoreGeometry.rootBase=10240*256; assert(native_ufs_log_open(&first,&blocks,&why));
++  native_ufs_log_close();
++  fresh(); gStoreGeometry.rootBase=kUnixnuLast-kUnixnuFirst+1-gReserve-1024-(gStoreGeometry.imageBytes+4095)/4096+1;
++  assert(!native_ufs_log_open(&first,&blocks,&why) && !strcmp(why,"overlaps the root image"));
+   fresh(); gStoreGeometry.imageBytes=(kUnixnuLast-kUnixnuFirst+1-gReserve)*4096;
+   assert(!native_ufs_log_open(&first,&blocks,&why) && !strcmp(why,"overlaps the root image"));
+   fresh();
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/tests/RootBase.cpp b/tests/RootBase.cpp
+--- a/tests/RootBase.cpp	1969-12-31 16:00:00
++++ b/tests/RootBase.cpp	2026-11-01 12:13:16
+@@ -0,0 +1,265 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// The root base (pagani-root-base-mib) and the version 2 manifest: the kernel's parser, plans and object read against a model LUN laid out
++// like the 13T's `unixnu` partition, with the iPadOS 17 image at its start and iPadOS 27 images at 10240 MiB and 27648 MiB. Host only.
++#define OPENSSL_SUPPRESS_DEPRECATED
++#include <openssl/sha.h>
++#include <array>
++#include <cassert>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <map>
++#include <vector>
++#include "../RootDiagnostics.h"
++using IOReturn=uint32_t;
++constexpr IOReturn kIOReturnSuccess=0, kIOReturnBadArgument=1, kIOReturnIOError=2;
++constexpr unsigned kDataMax=131072;
++static UfsRootDiagnostics gRootDiagnostic;
++static std::map<uint64_t,std::array<uint8_t,4096>> lun;       // blank when absent
++static std::vector<uint64_t> readLbas;
++static std::vector<uint32_t> readBlocks;
++static uint64_t failAt=UINT64_MAX;
++static IOReturn hostRead4k(uint8_t,uint64_t lba,uint32_t blocks,void *out)
++{
++  assert(blocks && blocks<=kDataMax/4096);
++  readLbas.push_back(lba); readBlocks.push_back(blocks);
++  for(uint32_t i=0;i<blocks;++i) {
++    if(lba+i==failAt) return 1;
++    auto f=lun.find(lba+i);
++    if(f==lun.end()) memset(static_cast<uint8_t *>(out)+i*4096ULL,0,4096);
++    else memcpy(static_cast<uint8_t *>(out)+i*4096ULL,f->second.data(),4096);
++  }
++  return 0;
++}
++#include "../RootLayout.h"
++#include "../RootWindowRead.h"
++#include "../LogWindow.h"
++
++// The 13T: board.toml, 调研/storage-27.md.
++constexpr uint64_t kFirst=107409152, kLast=124186367, kPartition=kLast-kFirst+1, kLunLast=kLast+6;
++constexpr uint64_t kBaseA=10240*256, kBaseB=27648*256, kReserve=1024*256;
++static_assert(kPartition*4096==68719476736ULL);
++static_assert(kFirst+kBaseA==110030592 && kFirst+kBaseB==114487040);
++
++static void put32(uint8_t *p,uint32_t v) { for(unsigned i=0;i<4;++i)p[i]=uint8_t(v>>(i*8)); }
++static void put64(uint8_t *p,uint64_t v) { for(unsigned i=0;i<8;++i)p[i]=uint8_t(v>>(i*8)); }
++
++static void gpt()
++{
++  auto &entries=lun[2]; entries.fill(0);
++  entries[0]=1; entries[16]=2; put64(entries.data()+32,kFirst); put64(entries.data()+40,kLast);
++  for(unsigned i=0;i<6;++i) entries[56+2*i]="unixnu"[i];
++  for(uint32_t i=3;i<6;++i) lun[i].fill(0);
++  std::array<uint8_t,16384> all{}; memcpy(all.data(),entries.data(),4096);
++  auto &header=lun[1]; header.fill(0);
++  memcpy(header.data(),"EFI PART",8); put32(header.data()+8,0x10000); put32(header.data()+12,92);
++  put64(header.data()+24,1); put64(header.data()+32,kLunLast); put64(header.data()+40,6); put64(header.data()+48,kLast);
++  put64(header.data()+72,2); put32(header.data()+80,128); put32(header.data()+84,128);
++  put32(header.data()+88,rootCrc32(all.data(),128*128));
++  put32(header.data()+16,rootCrc32(header.data(),92,true));
++}
++
++struct Item { const char *name; uint64_t offset,size; uint32_t block,flags; };
++static void manifest(uint64_t lba,uint32_t version,uint64_t imageBytes,std::initializer_list<Item> items)
++{
++  auto &m=lun[lba]; m.fill(0);
++  memcpy(m.data(),"SHNGROOT",8); put32(m.data()+8,version); put32(m.data()+12,uint32_t(items.size())); put64(m.data()+16,imageBytes);
++  unsigned index=0;
++  for(const Item &item: items) {
++    uint8_t *e=m.data()+24+128*index++;
++    strcpy(reinterpret_cast<char *>(e),item.name);
++    put64(e+32,item.offset); put64(e+40,item.size); put32(e+48,item.block); put32(e+52,item.flags);
++    memset(e+56,int(index),32);
++  }
++  SHA256(m.data(),4064,m.data()+4064);
++}
++
++static bool parse(RootLayout &layout,uint64_t base,const char **why=nullptr)
++{
++  const char *reason="";
++  readLbas.clear(); readBlocks.clear();
++  const bool result=findRootLayout(&layout,&reason,"unixnu",kLunLast,base);
++  if(why)*why=reason;
++  return result;
++}
++
++constexpr uint64_t kMiB=1024*1024;
++static const uint64_t kImage17=9382658048, kImage27=16*1024*kMiB;
++
++// The 17 image at the partition's start and two 27 images: each base sees its own and nothing of the others.
++static void sideBySide()
++{
++  lun.clear(); gpt();
++  manifest(kFirst,1,kImage17,{{"OS",kMiB,6077580800,512,1},{"SystemOS",5798*kMiB,3150*kMiB,512,1}});
++  manifest(kFirst+kBaseA,1,kImage27,{{"OS",kMiB,10*1024*kMiB,512,1},{"SystemOS",11*1024*kMiB,3*1024*kMiB,512,1}});
++  manifest(kFirst+kBaseB,1,kImage27,{{"OS",2*kMiB,10*1024*kMiB,512,1},{"SystemOS",11*1024*kMiB,4*1024*kMiB,512,1}});
++  RootLayout layout;
++  assert(parse(layout,0) && !layout.manifestStatus && !layout.rootBase && layout.imageBytes==kImage17 && layout.windows==2 && !layout.objects);
++  assert(rootImageFirst(layout)==kFirst && readLbas.back()==kFirst);
++  assert(rootAbsolute(layout,layout.window[0])==kFirst*4096+kMiB);
++  assert(rootAbsolute(layout,layout.window[1])==kFirst*4096+5798*kMiB);
++  assert(parse(layout,kBaseA) && !layout.manifestStatus && layout.rootBase==kBaseA && layout.imageBytes==kImage27 && layout.windows==2);
++  assert(rootImageFirst(layout)==110030592 && readLbas.back()==110030592);
++  assert(rootAbsolute(layout,layout.window[0])==110030592*4096ULL+kMiB && layout.window[0].size==10*1024*kMiB);
++  assert(rootAbsolute(layout,layout.window[0])/4096==110030592+256);
++  assert(ufsWindowGeometry(rootAbsolute(layout,layout.window[1]),layout.window[1].size));
++  assert(parse(layout,kBaseB) && !layout.manifestStatus && layout.rootBase==kBaseB && layout.window[1].size==4*1024*kMiB);
++  assert(rootImageFirst(layout)==114487040 && readLbas.back()==114487040);
++  assert(rootAbsolute(layout,layout.window[0])==114487040*4096ULL+2*kMiB);
++}
++
++// A base with no image behind it is no image: status 1, nothing published, and no fallback to what sits at the partition's start.
++static void noFallback()
++{
++  lun.clear(); gpt();
++  manifest(kFirst,1,kImage17,{{"OS",kMiB,6077580800,512,1},{"SystemOS",5798*kMiB,3150*kMiB,512,1}});
++  RootLayout layout; const char *why=nullptr;
++  assert(parse(layout,kBaseA) && layout.manifestStatus==1 && !layout.windows && !layout.imageBytes);
++  for(uint64_t lba: readLbas) assert(lba!=kFirst);
++  assert(parse(layout,kPartition-1) && layout.manifestStatus==1 && readLbas.back()==kLast);
++  for(const uint64_t base: {kPartition,kPartition+1,uint64_t(UINT32_MAX),UINT64_MAX,UINT64_MAX-kFirst}) {
++    assert(!parse(layout,base,&why) && !strcmp(why,"root base outside the partition"));
++    for(uint64_t lba: readLbas) assert(lba<kFirst);                                             // nothing inside the partition was read
++  }
++  failAt=kFirst+kBaseA;
++  assert(!parse(layout,kBaseA,&why) && !strcmp(why,"root partition first block read"));
++  failAt=UINT64_MAX;
++}
++
++// The manifest is bounded by what the partition holds from the base on, not by the partition.
++static void imageBounds()
++{
++  RootLayout layout;
++  const uint64_t room=(kPartition-kBaseA)*4096;
++  lun.clear(); gpt();
++  const auto image=[&](uint64_t bytes) { manifest(kFirst+kBaseA,1,bytes,{{"OS",kMiB,4096,512,1},{"SystemOS",2*kMiB,4096,512,1}}); };
++  image(room); assert(parse(layout,kBaseA) && !layout.manifestStatus);
++  image(room+4096); assert(parse(layout,kBaseA) && layout.manifestStatus==4 && !layout.windows);
++  manifest(kFirst,1,room+4096,{{"OS",kMiB,4096,512,1},{"SystemOS",2*kMiB,4096,512,1}});
++  assert(parse(layout,0) && !layout.manifestStatus);                                            // the same image fits without a base
++  manifest(kFirst,1,kPartition*4096,{{"OS",kMiB,4096,512,1},{"SystemOS",2*kMiB,4096,512,1}});
++  assert(parse(layout,0) && !layout.manifestStatus);
++  manifest(kFirst,1,kPartition*4096+4096,{{"OS",kMiB,4096,512,1},{"SystemOS",2*kMiB,4096,512,1}});
++  assert(parse(layout,0) && layout.manifestStatus==4);
++  // The last window ends at the last block of the partition, and a read of it stays inside.
++  const uint64_t size=room-kMiB;
++  manifest(kFirst+kBaseA,1,room,{{"OS",kMiB,size,512,1}});
++  assert(parse(layout,kBaseA) && !layout.manifestStatus);
++  assert((rootAbsolute(layout,layout.window[0])+layout.window[0].size)/4096==kLast+1);
++}
++
++static void version2()
++{
++  RootLayout layout;
++  const uint64_t table=(3*1024*kMiB/4096)*32, table2=table+4096+100;
++  const auto v2=[&](uint64_t lba) {
++    manifest(lba,2,kImage27,{{"OS",kMiB,4*1024*kMiB,512,1},{"SystemOS",5*1024*kMiB,3*1024*kMiB,512,1},
++                             {"OS.vroot",9*1024*kMiB,table,4096,3},{"SystemOS.vroot",10*1024*kMiB,table2,4096,3}});
++  };
++  for(const uint64_t base: {uint64_t(0),kBaseA,kBaseB}) {
++    lun.clear(); gpt(); v2(kFirst+base);
++    assert(parse(layout,base) && !layout.manifestStatus && layout.windows==2 && layout.objects==2);
++    assert(!strcmp(layout.window[1].name,"SystemOS") && !strcmp(layout.object[0].name,"OS.vroot") && !strcmp(layout.object[1].name,"SystemOS.vroot"));
++    assert(layout.object[1].size==table2 && layout.object[1].sha256[0]==4);
++    recordRootObjects(layout);
++    assert(gRootObjects==2 && gRootObjectBase==(kFirst+base)*4096);
++    // The object's bytes, across chunks, through the base; a table that does not end on a block boundary keeps only its own bytes.
++    const uint64_t lba=kFirst+base+10*1024*256;
++    std::vector<uint8_t> expected(table2),got(table2+1,0x5c);
++    for(uint64_t i=0;i<table2;++i) expected[i]=uint8_t(i*131+(i>>12));
++    for(uint64_t at=0;at<table2;at+=4096) {
++      auto &block=lun[lba+at/4096]; block.fill(0xee);
++      memcpy(block.data(),expected.data()+at,table2-at<4096?table2-at:4096);
++    }
++    readLbas.clear(); readBlocks.clear();
++    assert(readPolicyTable("SystemOS",got.data(),table2));
++    assert(!memcmp(got.data(),expected.data(),table2) && got[table2]==0x5c);
++    assert(readLbas.front()==lba);
++    for(size_t i=1;i<readLbas.size();++i) assert(readLbas[i]==readLbas[i-1]+readBlocks[i-1]);
++    assert(readLbas.size()>1);
++    // Wrong size, no such object, a name that does not fit, a failed read: refused.
++    assert(!readPolicyTable("SystemOS",got.data(),table2-1));
++    assert(!readPolicyTable("AppOS",got.data(),table2));
++    assert(!readPolicyTable("0123456789012345678901234567890",got.data(),table2));
++    failAt=lba+(table2-1)/4096;
++    assert(!readPolicyTable("SystemOS",got.data(),table2));
++    failAt=UINT64_MAX;
++  }
++  const auto refused=[&](uint32_t status,std::initializer_list<Item> items,uint32_t version=2) {
++    lun.clear(); gpt(); manifest(kFirst+kBaseA,version,kImage27,items);
++    assert(parse(layout,kBaseA) && layout.manifestStatus==status && !layout.windows && !layout.objects);
++  };
++  constexpr uint64_t G=1024*kMiB;
++  refused(2,{{"a",G,512,512,1},{"b",2*G,512,512,1},{"c",3*G,512,512,1},{"d",4*G,512,512,1},{"e",5*G,512,512,1}},1);   // 5 in version 1
++  refused(7,{{"a",G,512,512,1},{"o",2*G,4096,4096,3}},1);                                      // version 1 has no objects
++  refused(7,{{"o",G,4096,4096,3}});                                                            // nothing to publish
++  refused(7,{{"a",G,512,512,1},{"o",2*G,4096,4096,1}});                                        // neither a window nor an object
++  refused(7,{{"a",G,512,512,1},{"b",2*G,512,512,1},{"c",3*G,512,512,1},{"d",4*G,512,512,1},{"e",5*G,512,512,1}});
++  refused(7,{{"a",G,512,512,1},{"o",2*G,4096,4096,3},{"p",3*G,4096,4096,3},{"q",4*G,4096,4096,3},{"r",5*G,4096,4096,3},{"s",6*G,4096,4096,3}});
++  refused(4,{{"a",G,513,512,1}});                                                              // a window keeps its sector size
++  refused(4,{{"a",G,512,512,1},{"o",G+1,4096,4096,3}});
++  refused(5,{{"a",G,512,512,1},{"a",2*G,4096,4096,3}});                                        // names are one namespace
++  refused(6,{{"a",G,4096,512,1},{"o",G,4096,4096,3}});                                         // so is the space
++  refused(6,{{"o",G,4097,4096,3},{"a",G+4096,4096,512,1}});                                    // an object's last block counts whole
++  lun.clear(); gpt(); manifest(kFirst+kBaseA,2,kImage27,{{"o",G,4097,4096,3},{"a",G+8192,4096,512,1}});
++  assert(parse(layout,kBaseA) && !layout.manifestStatus && layout.objects==1 && layout.windows==1);
++}
++
++// Where the log and the store go does not depend on the base; whether they may does: what lies below the image counts as taken.
++static void overlaps()
++{
++  const uint64_t blocks27=kImage27/4096;
++  for(const uint64_t base: {uint64_t(0),kBaseA,kBaseB}) {
++    // Log: the edge of the guard, in blocks of image, from both sides.
++    const uint64_t edge=kPartition-kReserve-base-1024;
++    UfsLogPlan plan=ufsLogPlan("unixnu",kFirst,kLast,edge*4096,kReserve,base);
++    assert(!plan.refusal && plan.logFirst==kLast+1-kLogReserveBlocks && plan.exportFirst==plan.logFirst-kExportBlocks);
++    assert(!strcmp(ufsLogPlan("unixnu",kFirst,kLast,edge*4096+1,kReserve,base).refusal,"overlaps the root image"));
++    assert(!ufsLogPlan("unixnu",kFirst,kLast,blocks27*4096,kReserve,base).refusal);
++    // Store: the same edge less its size; its place is fixed by the end of the partition.
++    constexpr uint64_t store=19*1024*256;
++    const uint64_t storeEdge=edge-store;
++    uint64_t first=0;
++    assert(!ufsStorePlan(kFirst,kLast,storeEdge*4096,store,kReserve,base,&first) && first==kLast+1-kReserve-store);
++    first=0;
++    assert(!strcmp(ufsStorePlan(kFirst,kLast,storeEdge*4096+1,store,kReserve,base,&first),"overlaps the root image") && !first);
++    assert(!ufsStorePlan(kFirst,kLast,blocks27*4096,store,kReserve,base,&first));
++  }
++  // An image that clears the log at base 0 runs into it at 10240 MiB; the 13T's 9 GiB image does not.
++  const uint64_t edge0=(kPartition-kReserve-1024)*4096;
++  assert(!ufsLogPlan("unixnu",kFirst,kLast,edge0,kReserve,0).refusal);
++  assert(ufsLogPlan("unixnu",kFirst,kLast,edge0,kReserve,kBaseA).refusal);
++  assert(!ufsLogPlan("unixnu",kFirst,kLast,0x22F400000,kReserve,kBaseA).refusal);
++  uint64_t first=0;
++  assert(!ufsStorePlan(kFirst,kLast,edge0-4096,1,kReserve,0,&first));
++  assert(ufsStorePlan(kFirst,kLast,edge0-4096,1,kReserve,kBaseA,&first));
++  // Base at the very top: the subtraction must not wrap into "plenty of room".
++  for(const uint64_t base: {kPartition-kReserve,kPartition-kReserve+1,kPartition,uint64_t(UINT64_MAX)}) {
++    assert(ufsLogPlan("unixnu",kFirst,kLast,4096,kReserve,base).refusal);
++    assert(ufsStorePlan(kFirst,kLast,4096,4096,kReserve,base,&first));
++  }
++  assert(ufsLogPlan("unixnu",kFirst,kLast,0,kReserve,kPartition-kReserve-1023).refusal);
++  assert(!ufsLogPlan("unixnu",kFirst,kLast,0,kReserve,kPartition-kReserve-1024).refusal);
++  assert(ufsStorePlan(kFirst,kLast,0,4096,kReserve,kPartition-kReserve-4096-1023,&first));
++  assert(!ufsStorePlan(kFirst,kLast,0,4096,kReserve,kPartition-kReserve-4096-1024,&first));
++  // The store's size refusals come first, as they always did.
++  assert(!strcmp(ufsStorePlan(kFirst,kLast,4096,0,kReserve,kBaseA,&first),"size"));
++  assert(!strcmp(ufsStorePlan(kFirst,kLast,4096,kPartition-kReserve+1,kReserve,kBaseA,&first),"size"));
++  assert(!strcmp(ufsStorePlan(kFirst,kLast,4096,1,kPartition,kBaseA,&first),"size"));
++  // Open: a refusal by the base touches nothing.
++  uint8_t block[4096]; uint64_t logFirst=0; unsigned reads=0,opens=0;
++  auto read=[&](uint64_t,uint8_t *to) { ++reads; memset(to,0,4096); return true; };
++  auto open=[&](uint64_t,uint64_t) { ++opens; return true; };
++  assert(ufsLogOpenWindow("unixnu",kFirst,kLast,edge0,kReserve,block,read,open,&logFirst,kBaseA) && !reads && !opens && !logFirst);
++  assert(!ufsLogOpenWindow("unixnu",kFirst,kLast,edge0,kReserve,block,read,open,&logFirst) && reads==4 && opens==1 && logFirst==kLast+1-kLogReserveBlocks);
++}
++
++int main()
++{
++  sideBySide();
++  noFallback();
++  imageBounds();
++  version2();
++  overlaps();
++  puts("PASS: root base 0, 10240 and 27648 MiB: manifest, windows, objects, image bounds and the log's and store's overlap edges; version 2 objects");
++}
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/tests/RootBaseMainline.cpp b/tests/RootBaseMainline.cpp
+--- a/tests/RootBaseMainline.cpp	1969-12-31 16:00:00
++++ b/tests/RootBaseMainline.cpp	2026-11-01 12:13:09
+@@ -0,0 +1,157 @@
++// SPDX-License-Identifier: BSD-2-Clause-Patent
++// With root base 0 this copy must do what the iPadOS 17 mainline does: the mainline's RootLayout.h and LogWindow.h, compiled beside this copy's
++// under MAINLINE_DIR, on the same inputs, field by field and read by read. Version 1 only: version 2 is new at every base. Host only.
++#define OPENSSL_SUPPRESS_DEPRECATED
++#include <openssl/sha.h>
++#include <cassert>
++#include <cstdint>
++#include <cstdio>
++#include <cstring>
++#include <map>
++#include <random>
++#include <vector>
++#include "../RootDiagnostics.h"
++using IOReturn=uint32_t;
++constexpr IOReturn kIOReturnSuccess=0;
++constexpr unsigned kDataMax=131072;
++static UfsRootDiagnostics gRootDiagnostic;
++static uint8_t header[4096],entries[16384],manifest[4096];
++static uint64_t manifestLba;
++static std::vector<std::pair<uint64_t,uint32_t>> reads;
++static uint64_t failLba=UINT64_MAX;
++static IOReturn hostRead4k(uint8_t,uint64_t lba,uint32_t blocks,void *out)
++{
++  reads.push_back({lba,blocks});
++  if(lba==failLba) return 1;
++  memset(out,0,blocks*4096ULL);
++  if(lba==1 && blocks==1) memcpy(out,header,4096);
++  else if(lba>=2 && lba<6) memcpy(out,entries+(lba-2)*4096,(6-lba)*4096>blocks*4096ULL?blocks*4096ULL:(6-lba)*4096);
++  else if(lba==manifestLba && blocks==1) memcpy(out,manifest,4096);
++  return 0;
++}
++#define STRINGIFY2(x) #x
++#define STRINGIFY(x) STRINGIFY2(x)
++namespace mainline {
++#include STRINGIFY(MAINLINE_DIR/RootLayout.h)
++#include STRINGIFY(MAINLINE_DIR/LogWindow.h)
++}
++namespace port {
++#include "../RootLayout.h"
++#include "../LogWindow.h"
++}
++
++static void put32(uint8_t *p,uint32_t v) { for(unsigned i=0;i<4;++i)p[i]=uint8_t(v>>(i*8)); }
++static void put64(uint8_t *p,uint64_t v) { for(unsigned i=0;i<8;++i)p[i]=uint8_t(v>>(i*8)); }
++static void checksums()
++{
++  SHA256(manifest,4064,manifest+4064);
++  put32(header+88,port::rootCrc32(entries,128*128));
++  put32(header+16,port::rootCrc32(header,92,true));
++}
++static void fixture()
++{
++  memset(header,0,sizeof(header)); memset(entries,0,sizeof(entries)); memset(manifest,0,sizeof(manifest));
++  memcpy(header,"EFI PART",8); put32(header+8,0x10000); put32(header+12,92);
++  put64(header+24,1); put64(header+32,0x3d0abff); put64(header+40,6); put64(header+48,0x3d0abfa);
++  put64(header+72,2); put32(header+80,128); put32(header+84,128);
++  entries[0]=1; entries[16]=2; put64(entries+32,0x2f3840); put64(entries+40,0x3d0abfa);
++  for(unsigned i=0;i<6;++i) entries[56+2*i]="unixnu"[i];
++  manifestLba=0x2f3840;
++  memcpy(manifest,"SHNGROOT",8); put32(manifest+8,1); put32(manifest+12,2); put64(manifest+16,1ULL<<33);
++  for(unsigned i=0;i<2;++i) {
++    uint8_t *e=manifest+24+i*128; strcpy(reinterpret_cast<char *>(e),i?"SystemOS":"OS");
++    put64(e+32,(1ULL<<20)+(uint64_t(i)<<32)); put64(e+40,1ULL<<30); put32(e+48,512); put32(e+52,1);
++    memset(e+56,0x41+int(i),32);
++  }
++  checksums();
++}
++
++static void sameWindow(const mainline::RootWindow &a,const port::RootWindow &b)
++{
++  assert(!memcmp(a.name,b.name,32) && a.offset==b.offset && a.size==b.size && !memcmp(a.sha256,b.sha256,32));
++}
++
++static unsigned accepted,refusedManifest,refusedGpt;
++static void same(const char *wanted,uint64_t lastLba)
++{
++  static mainline::RootLayout a; static port::RootLayout b;
++  memset(&a,0x55,sizeof(a)); memset(&b,0xaa,sizeof(b));
++  const char *whyA="-",*whyB="-";
++  reads.clear(); const bool ra=mainline::findRootLayout(&a,&whyA,wanted,lastLba); const auto readsA=reads;
++  reads.clear(); const bool rb=port::findRootLayout(&b,&whyB,wanted,lastLba); const auto readsB=reads;
++  assert(ra==rb && readsA==readsB && !strcmp(whyA,whyB));
++  assert(a.userdataFirst==b.userdataFirst && a.userdataLast==b.userdataLast && a.imageBytes==b.imageBytes && a.gptEntriesLba==b.gptEntriesLba);
++  assert(a.gptHeaderCrc==b.gptHeaderCrc && a.gptEntriesCrc==b.gptEntriesCrc && a.gptEntryCount==b.gptEntryCount);
++  assert(a.windows==b.windows && a.manifestStatus==b.manifestStatus && a.magic0==b.magic0 && a.magic1==b.magic1);
++  assert(a.ext4Magic==b.ext4Magic && a.ext4Blocks==b.ext4Blocks && !b.rootBase && !b.objects);
++  for(uint32_t i=0;i<a.windows;++i) {
++    sameWindow(a.window[i],b.window[i]);
++    assert(a.userdataFirst*4096ULL+a.window[i].offset==port::rootAbsolute(b,b.window[i]));
++  }
++  if(!ra) ++refusedGpt; else if(a.manifestStatus) ++refusedManifest; else ++accepted;
++}
++
++// native_ufs_store_open's checks as the mainline writes them inline.
++static const char *mainlineStore(uint64_t firstLba,uint64_t lastLba,uint64_t imageBytes,uint64_t blocks,uint64_t reserve,uint64_t *out)
++{
++  uint64_t partition=lastLba-firstLba+1;
++  uint64_t imageBlocks=(imageBytes+4095)/4096;
++  if(!blocks || reserve>=partition || blocks>partition-reserve) return "size";
++  if(partition-blocks-reserve<imageBlocks+1024) return "overlaps the root image";
++  *out=lastLba+1-reserve-blocks;
++  return nullptr;
++}
++
++int main()
++{
++  std::mt19937_64 random(0x13717);
++  // The named cases of tests/RootLayout.cpp and the one-off faults around them.
++  fixture(); same("unixnu",UINT32_MAX);
++  fixture(); same("unixnu",0x3d0abff); same("unixnu",0x3d0abfe); same("userdata",UINT32_MAX); same("",UINT32_MAX); same(nullptr,UINT32_MAX);
++  fixture(); failLba=0x2f3840; same("unixnu",UINT32_MAX); failLba=1; same("unixnu",UINT32_MAX); failLba=2; same("unixnu",UINT32_MAX); failLba=UINT64_MAX;
++  // Mutations of everything the parser reads, with the checksums made right again, so that they reach the checks behind them.
++  for(unsigned i=0;i<200000;++i) {
++    fixture();
++    const unsigned changes=1+unsigned(random()%3);
++    for(unsigned c=0;c<changes;++c) {
++      const uint64_t value=random();
++      switch(random()%8) {
++        case 0: manifest[random()%(24+128*4)]^=uint8_t(value|1); break;
++        case 1: { uint8_t *e=manifest+24+128*(random()%4); put64(e+32,value&0x3fffff000ULL); break; }
++        case 2: { uint8_t *e=manifest+24+128*(random()%4); put64(e+40,value&0x3ffffffffULL); break; }
++        case 3: { uint8_t *e=manifest+24+128*(random()%4); put32(e+48,(value&1)?512:4096); put32(e+52,(value&2)?1:3); break; }
++        case 4: put32(manifest+12,uint32_t(value%7)); break;
++        case 5: put64(manifest+16,value&0x7ffffffffULL); break;
++        case 6: header[random()%92]^=uint8_t(value|1); break;
++        default: entries[random()%256]^=uint8_t(value|1); break;
++      }
++    }
++    if(random()%8) put32(manifest+8,1);                                                          // mostly version 1, some any other but 2
++    if(port::le32(manifest+8)==2) put32(manifest+8,3);
++    if(random()%32) checksums();
++    manifestLba=port::le64(entries+32);
++    same("unixnu",UINT32_MAX);
++  }
++  assert(accepted>1000 && refusedManifest>1000 && refusedGpt>1000);
++  // A partition holding no image at all: the same as the mainline, block contents and all.
++  fixture(); memset(manifest,0,sizeof(manifest)); manifest[1080]=0x53; manifest[1081]=0xef; put32(manifest+1028,1234); same("unixnu",UINT32_MAX);
++  // The plans, on boundaries and at random.
++  const auto pick=[&](uint64_t around) { const uint64_t spread=uint64_t(random()%4097)-2048; return (random()%4)?around+spread:random()>>(random()%64); };
++  unsigned plans=0;
++  for(unsigned i=0;i<2000000;++i) {
++    uint64_t first=pick(107409152),last=pick(124186367),partition=last-first+1,reserve=pick(262144);
++    if(random()%2) reserve=pick(partition);
++    uint64_t image=pick((partition-reserve-1024)*4096),blocks=pick(4980736);
++    if(random()%2) blocks=pick(partition-reserve-(image+4095)/4096-1024);
++    const char *name=(random()%16)?"unixnu":"userdata";
++    const auto a=mainline::ufsLogPlan(name,first,last,image,reserve);
++    const auto b=port::ufsLogPlan(name,first,last,image,reserve);
++    assert(!a.refusal==!b.refusal && (!a.refusal || !strcmp(a.refusal,b.refusal)) && a.logFirst==b.logFirst && a.exportFirst==b.exportFirst);
++    if(!a.refusal) ++plans;
++    uint64_t storeA=0,storeB=0;
++    const char *ra=mainlineStore(first,last,image,blocks,reserve,&storeA),*rb=port::ufsStorePlan(first,last,image,blocks,reserve,0,&storeB);
++    assert(!ra==!rb && (!ra || !strcmp(ra,rb)) && storeA==storeB);
++  }
++  assert(plans>1000);
++  printf("PASS: base 0 is the mainline: %u layouts accepted, %u manifests and %u GPTs refused alike, same reads; log and store plans alike\n",accepted,refusedManifest,refusedGpt);
++}
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/tests/RootPathBridge.cpp b/tests/RootPathBridge.cpp
+--- a/tests/RootPathBridge.cpp	2026-10-29 10:38:54
++++ b/tests/RootPathBridge.cpp	2026-11-01 12:11:11
+@@ -48,7 +48,7 @@
+     }
+     uint64_t copy(uint64_t offset,const void *data,uint64_t length) { memcpy(out+offset,data,length); return length; }
+   } ops{out};
+-  auto result=ufsReadWindow(ops,layout.userdataFirst*4096+layout.window[selected].offset,
++  auto result=ufsReadWindow(ops,rootAbsolute(layout,layout.window[selected]),
+                              layout.window[selected].size,block,count,bounce);
+   *done=result.done; return result.status;
+ }
+diff -ruN -x ORIGIN.md -x ORIGIN.sha256 -x ORIGIN.diff -x __pycache__ -x .DS_Store a/tests/check_root_path_host.py b/tests/check_root_path_host.py
+--- a/tests/check_root_path_host.py	2026-10-31 20:12:13
++++ b/tests/check_root_path_host.py	2026-11-01 12:13:09
+@@ -11,20 +11,27 @@
+ parser.add_argument('--openssl-prefix',type=Path)
+ parser.add_argument('--root-image',type=Path,help='Optional existing image: read only its first 4096 bytes')
+ parser.add_argument('--gpt-dir',type=Path,help='Optional PKX110 GPT dumps (sda..sdf_主GPT.bin) for PartitionTable')
++parser.add_argument('--mainline',type=Path,help='The iPadOS 17 NativeUfs directory: RootBaseMainline compares root base 0 with it')
+ args=parser.parse_args()
+ source=Path(__file__).resolve().parent
+ out=args.output.resolve();out.mkdir(parents=True,exist_ok=True)
+ openssl=args.openssl_prefix or Path(subprocess.check_output(['brew','--prefix','openssl@3'],text=True).strip())
+-for name in ('RootLayout','RootWindowRead','RootDiagnostics','RootPublication','PartitionTable'):
++for name in ('RootLayout','RootBase','RootWindowRead','RootDiagnostics','RootPublication','PartitionTable'):
+     binary=out/name
+     command=['clang++','-std=c++17','-Wall','-Wextra','-Werror','-fsanitize=address,undefined','-g',str(source/(name+'.cpp')),'-o',str(binary)]
+-    if name=='RootLayout':command+=['-I',str(openssl/'include'),'-L',str(openssl/'lib'),'-lcrypto']
++    if name in ('RootLayout','RootBase'):command+=['-I',str(openssl/'include'),'-L',str(openssl/'lib'),'-lcrypto']
+     subprocess.run(command,check=True,timeout=60)
+     command=[str(binary)]
+     if name=='RootLayout' and args.root_image:command.append(str(args.root_image.resolve()))
+     if name=='PartitionTable' and args.gpt_dir:command.append(str(args.gpt_dir.resolve()))
+     with (out/(name+'.log')).open('w') as log:subprocess.run(command,check=True,timeout=20,stdout=log,stderr=subprocess.STDOUT)
+     print('PASS:',name)
++if args.mainline:
++    binary=out/'RootBaseMainline'
++    subprocess.run(['clang++','-std=c++17','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-fsanitize=address,undefined','-g','-O1',f'-DMAINLINE_DIR={args.mainline.resolve()}',
++                    str(source/'RootBaseMainline.cpp'),'-o',str(binary),'-I',str(openssl/'include'),'-L',str(openssl/'lib'),'-lcrypto'],check=True,timeout=120)
++    with (out/'RootBaseMainline.log').open('w') as log:subprocess.run([str(binary)],check=True,timeout=300,stdout=log,stderr=subprocess.STDOUT)
++    print('PASS: RootBaseMainline')
+ # The real command path as the kernel builds it (read-only but for the diagnostic log), and as a read-only image without that switch.
+ kernel=['-DNATIVE_UFS_SM8750=1','-DNATIVE_UFS_READ_ONLY=1']
+ for name,source_name,flags in (('RootCommands','RootCommands',kernel+['-DNATIVE_UFS_LOG_WRITES=1']),

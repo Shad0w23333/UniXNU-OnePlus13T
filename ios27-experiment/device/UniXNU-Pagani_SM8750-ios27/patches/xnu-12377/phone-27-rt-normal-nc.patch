@@ -1,0 +1,29 @@
+phone-27-rt-normal-nc.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 62 块（proc_reg.h）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关（BCM2837 目标都一样），GPU 和显示相关。
+作用：VM_WIMG_RT 的内存属性从 Device 改成 Normal 非缓存（与 HAS_UCNORMAL_MEM 同义）。Metal 和 Vulkan 用户态
+对实时映射的表面做非对齐和向量访问，Device 内存会产生对齐异常。
+范围：wimg_to_pte 里只有 is_dram_addr(pa) 的页才用这个属性，MMIO 仍是 Device。
+13T 现状：10063 上用的是 Device，A830 桌面能跑，说明目前没踩到；27 的 GPU 路径变了，先跟 sheng 一致。
+
+diff --git a/osfmk/arm64/proc_reg.h b/osfmk/arm64/proc_reg.h
+index 905f431..708d1c9 100644
+--- a/osfmk/arm64/proc_reg.h
++++ b/osfmk/arm64/proc_reg.h
+@@ -1829,7 +1829,11 @@
+ 
+ #endif /* HAS_FEAT_XS */
+ 
+-#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM
++/*
++ * BCM2837 (the sheng native kernel): real-time memory is Normal non-cacheable, as with HAS_UCNORMAL_MEM, so user code may
++ * use unaligned and vector accesses on real-time-mapped surfaces (Device memory would raise alignment faults).
++ */
++#if HAS_UCNORMAL_MEM || APPLEVIRTUALPLATFORM || defined(BCM2837)
+ #define CACHE_ATTRINDX_RT CACHE_ATTRINDX_WRITECOMB
+ #else
+ #define CACHE_ATTRINDX_RT CACHE_ATTRINDX_POSTED_COMBINED_REORDERED

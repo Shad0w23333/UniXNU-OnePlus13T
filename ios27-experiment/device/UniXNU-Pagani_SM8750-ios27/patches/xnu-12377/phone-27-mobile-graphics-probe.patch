@@ -1,0 +1,24 @@
+phone-27-mobile-graphics-probe.patch（从 sheng 移植）
+
+来源：UniXNU-sheng patches/xnu-12377/zzzz-sheng-ipados27-bringup.patch（快照提交 6b11bb5），第 28 块（IOUserClient.cpp）。
+版权：Copyright (c) 2026, UniXNU contributors. SPDX-License-Identifier: BSD-2-Clause-Patent。
+原文件的版权声明和许可条款继续有效，这里只改写说明文字和按 13T 调整的部分。
+
+类别：板无关，27 的 IOMobileFramebuffer 适配探针。
+作用：native_mobile_graphics_client_probe 的旧式 externalMethod 选择子检查跳过 IOUserClient2022，
+iPadOS 27 的 user client 只接受不透明参数形式，走旧路径会 panic。
+
+diff --git a/iokit/Kernel/IOUserClient.cpp b/iokit/Kernel/IOUserClient.cpp
+index 329a216..008e003 100644
+--- a/iokit/Kernel/IOUserClient.cpp
++++ b/iokit/Kernel/IOUserClient.cpp
+@@ -6955,7 +6955,8 @@ native_mobile_graphics_client_probe(void)
+ 		native_mobile_graphics_client_meta = (uintptr_t)client->getMetaClass();
+ 		native_mobile_graphics_client_size = client->getMetaClass()->getClassSize();
+ 		native_mobile_graphics_client_init = client->init();
+-		if (native_mobile_graphics_client_init) {
++		/* An IOUserClient2022 (iPadOS 27) takes only the opaque-argument externalMethod: skip the old-form selector check. */
++		if (native_mobile_graphics_client_init && !OSDynamicCast(IOUserClient2022, client)) {
+ 			IOExternalMethodArguments arguments = {};
+ 			const uint32_t selectors[] = {90, 0x80000000U, ~0U};
+ 			for (unsigned i = 0; i < 3; i++) {

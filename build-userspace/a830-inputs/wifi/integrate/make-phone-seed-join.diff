@@ -1,0 +1,31 @@
+--- a/工具/make-phone-seed.py
++++ b/工具/make-phone-seed.py
+@@ -81,9 +81,9 @@
+ 
+ --wifi-firmware DIR  the peach Wi-Fi firmware pulled from the phone (build-userspace/a830-inputs/wifi/make-wifi-firmware-seed.md)
+                    to /private/var/ngpu/firmware/wlan, its layout kept (peach/amss20.bin, tmel_peach_20.elf, join.txt ...): regular
+-                   files only, 0644, at most 64 MiB in all. PaganiWifi (pagani-wifi=5 or 6) reads it there after Data is mounted
+-                   when the files are not on modem_a; the seed is volatile, nothing is written to the phone. A sha256 of each file
+-                   goes to the report. Vendor files: the seed stays local, never committed.
++                   files only, 0644 (join.txt, a password in the clear: 0600), at most 64 MiB in all. PaganiWifi (pagani-wifi=5 or 6)
++                   reads it there after Data is mounted when the files are not on modem_a; the seed is volatile, nothing is written to
++                   the phone. A sha256 of each file but join.txt goes to the report. Vendor files: the seed stays local, never committed.
+ 
+ BASE is not modified; the volume UUID is unchanged. Writes OUTPUT and OUTPUT with .json (what was done). Runs on macOS (hdiutil, diskutil)."""
+ import argparse
+@@ -475,11 +475,13 @@
+                     target_file = destination / relative
+                     target_file.parent.mkdir(parents=True, exist_ok=True)
+                     shutil.copyfile(source, target_file)
+-                    target_file.chmod(0o644)
++                    secret = source.name == 'join.txt'      # a network password in the clear: the kernel reads it, nothing else needs to
++                    target_file.chmod(0o600 if secret else 0o644)
+                     data = target_file.read_bytes()
+                     if data != source.read_bytes():
+                         sys.exit(f'--wifi-firmware: {relative} reads back different')
+-                    files[str(relative)] = dict(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
++                    # (the digest of a short text can be searched: join.txt gets none in the report)
++                    files[str(relative)] = dict(bytes=len(data), sha256=None if secret else hashlib.sha256(data).hexdigest())
+                 report['wifi_firmware'] = dict(directory='/private/var/' + WIFI_FIRMWARE, files=files)
+             usage = subprocess.run(['df', '-k', str(mount)], capture_output=True, text=True).stdout.splitlines()[-1].split()
+             report['used_kib'], report['available_kib'] = int(usage[2]), int(usage[3])

@@ -1,0 +1,249 @@
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -2182,6 +2182,132 @@
+ 
+ 
+ /*
++ * PaganiDiag (phone-diag-sysctl.patch; UniXNU-Pagani-Drivers drivers/PaganiDiag): the diagnostic daemon's lines in BootProgress's
++ * boot log (kern.pagani_diag_line, pagani_diag.h), and the daemon's start.
++ *
++ * The start: launchd of 21H461 takes every job below /System/Library from its signed cache /System/Library/xpc/launchd.plist on a
++ * normal boot (only rd=md0 or a Restore/Ramdisk ReleaseType reads the job files), so the owner overlay of /System/Library/LaunchDaemons
++ * adds no job: adrenoprobed never ran (UniXNU-sheng BootDiagExport.c: "a launchd job that never runs"). Instead the first exec of
++ * /usr/libexec/DumpPanic by xpcproxy or launchd (job com.apple.DumpPanic: root, RunAtLoad, no MachServices, restarted only after a
++ * crash; it files the previous boot's panic report, which this board does not keep) runs /private/var/ngpu/bin/paganidiag in its
++ * place when the Data seed has that file and boot-arg pagani-diag is not 0. A later exec (the restart after a crash) runs DumpPanic.
++ * Without the file nothing changes and nothing is logged. With it the launch is logged ("diag: launch pid N DumpPanic -> paganidiag")
++ * and, PAGANI_DIAG_SILENCE_SECONDS later, "diag: no line from pid N in 90 s" when the daemon has written nothing.
++ */
++#include <kern/clock.h>
++#include "pagani_diag.h"
++extern void boot_progress_trace(const char *text) __attribute__((weak_import));
++static LCK_GRP_DECLARE(pagani_diag_lck_grp, "pagani-diag");
++static LCK_MTX_DECLARE(pagani_diag_lock, &pagani_diag_lck_grp);
++static struct pagani_diag_limit pagani_diag_limit;
++static uint32_t pagani_diag_launched;   /* the first exec of the host has been seen */
++SYSCTL_UINT(_kern, OID_AUTO, pagani_diag_dropped, CTLFLAG_RD | CTLFLAG_LOCKED, &pagani_diag_limit.dropped, 0, "");
++
++static int
++sysctl_pagani_diag_line SYSCTL_HANDLER_ARGS
++{
++#pragma unused(oidp, arg1, arg2)
++	char text[PAGANI_DIAG_TEXT], line[PAGANI_DIAG_TEXT + 1];
++	if (req->newptr == USER_ADDR_NULL || !kauth_cred_issuser(kauth_cred_get())) {
++		return EPERM;
++	}
++	size_t length = req->newlen;
++	if (length > sizeof(text)) {
++		length = sizeof(text);
++	}
++	int error = SYSCTL_IN(req, text, length);
++	if (error) {
++		return error;
++	}
++	if (!pagani_diag_line(line, text, length)) {
++		return EINVAL;
++	}
++	uint64_t now = mach_absolute_time(), window = 0;
++	nanoseconds_to_absolutetime((uint64_t)PAGANI_DIAG_WINDOW_SECONDS * NSEC_PER_SEC, &window);
++	lck_mtx_lock(&pagani_diag_lock);
++	int taken = pagani_diag_take(&pagani_diag_limit, now, window);
++	bool note = taken != PAGANI_DIAG_TAKEN && !pagani_diag_limit.noted;
++	if (note) {
++		pagani_diag_limit.noted = 1;
++	}
++	lck_mtx_unlock(&pagani_diag_lock);
++	if (boot_progress_trace) {
++		if (taken == PAGANI_DIAG_TAKEN) {
++			boot_progress_trace(line);
++		} else if (note) {
++			boot_progress_trace(taken == PAGANI_DIAG_OVER_BOOT ? "diag: kernel limit of 300 lines a boot reached, later lines dropped" :
++			    "diag: kernel limit of 20 lines in 10 s reached, lines dropped");
++		}
++	}
++	return taken == PAGANI_DIAG_TAKEN ? 0 : taken == PAGANI_DIAG_OVER_BOOT ? ENOSPC : EAGAIN;
++}
++SYSCTL_PROC(_kern, OID_AUTO, pagani_diag_line, CTLTYPE_STRING | CTLFLAG_WR | CTLFLAG_LOCKED, 0, 0, sysctl_pagani_diag_line, "A", "");
++
++static void
++pagani_diag_silence(void *arg)
++{
++	if (!os_atomic_load(&pagani_diag_limit.lines, relaxed) && boot_progress_trace) {
++		char line[64];
++		snprintf(line, sizeof(line), "diag: no line from pid %d in %d s", (int)(uintptr_t)arg, PAGANI_DIAG_SILENCE_SECONDS);
++		boot_progress_trace(line);
++	}
++}
++
++/* exec_activate_image, with the saved path: the first exec of PAGANI_DIAG_HOST by xpcproxy or launchd saves PAGANI_DIAG_DAEMON in its
++ * place (see above). An error fails the exec. */
++static int
++pagani_diag_launch(struct image_params *imgp, proc_t p, const char **excpath)
++{
++	if (os_atomic_load(&pagani_diag_launched, relaxed) || p == PROC_NULL || strcmp(*excpath, PAGANI_DIAG_HOST) != 0) {
++		return 0;
++	}
++	const char *name = proc_best_name(p);
++	if (proc_getpid(p) != 1 && strcmp(name, "xpcproxy") != 0 && strcmp(name, "launchd") != 0) {
++		return 0;
++	}
++	if (!os_atomic_cmpxchg(&pagani_diag_launched, 0, 1, relaxed)) {
++		return 0;
++	}
++	uint32_t enabled = 1;
++	if (PE_parse_boot_argn("pagani-diag", &enabled, sizeof(enabled)) && !enabled) {
++		return 0;
++	}
++	vnode_t vp = NULLVP;
++	int error = vnode_lookup(PAGANI_DIAG_DAEMON, 0, &vp, vfs_context_current());
++	if (!error) {
++		if (vnode_vtype(vp) != VREG) {
++			error = ENOEXEC;
++		}
++		vnode_put(vp);
++	}
++	if (error == ENOENT) {
++		return 0;               /* a Data seed without the daemon */
++	}
++	char line[80];
++	if (error) {
++		if (boot_progress_trace) {
++			snprintf(line, sizeof(line), "diag: launch pid %d: daemon error %d, DumpPanic runs", proc_getpid(p), error);
++			boot_progress_trace(line);
++		}
++		return 0;
++	}
++	exec_reset_save_path(imgp);
++	error = exec_save_path(imgp, CAST_USER_ADDR_T(PAGANI_DIAG_DAEMON), UIO_SYSSPACE, excpath);
++	if (boot_progress_trace) {
++		if (error) {
++			snprintf(line, sizeof(line), "diag: launch pid %d failed %d", proc_getpid(p), error);
++		} else {
++			snprintf(line, sizeof(line), "diag: launch pid %d DumpPanic -> paganidiag", proc_getpid(p));
++		}
++		boot_progress_trace(line);
++	}
++	if (!error) {
++		timeout(pagani_diag_silence, (void *)(uintptr_t)proc_getpid(p), PAGANI_DIAG_SILENCE_SECONDS * hz);
++	}
++	return error;
++}
++
++/*
+  * exec_activate_image
+  *
+  * Description:	Iterate through the available image activators, and activate
+@@ -2239,6 +2365,11 @@
+ 		goto bad_notrans;
+ 	}
+ 
++	error = pagani_diag_launch(imgp, p, &excpath);   /* PaganiDiag: the daemon in place of DumpPanic */
++	if (error) {
++		goto bad_notrans;
++	}
++
+ 	/* Use excpath, which contains the copyin-ed exec path */
+ 	DTRACE_PROC1(exec, uintptr_t, excpath);
+ 
+--- /dev/null
++++ b/bsd/kern/pagani_diag.h
+@@ -0,0 +1,99 @@
++/* SPDX-License-Identifier: BSD-2-Clause-Patent */
++/*
++ * PaganiDiag, kernel side (phone-diag-sysctl.patch; UniXNU-Pagani-Drivers drivers/PaganiDiag).
++ *
++ * kern.pagani_diag_line is a write-only, root-only string sysctl: each write is one line, logged as the BootProgress U line
++ * "diag: <text>". The text is the written bytes up to the first NUL or line break, at most PAGANI_DIAG_TEXT of them; a leading
++ * "diag: " is not doubled, control and non-ASCII bytes become spaces, and the whole line stays within one 200-character U record.
++ * The kernel logs at most PAGANI_DIAG_BOOT_LINES lines a boot and PAGANI_DIAG_WINDOW_LINES in any PAGANI_DIAG_WINDOW_SECONDS; a write
++ * over a limit fails (EAGAIN for the window, ENOSPC for the boot), is counted (kern.pagani_diag_dropped) and the first such write logs
++ * one line saying so.
++ *
++ * Pure C without kernel dependencies so the host test compiles the same code (drivers/PaganiDiag/Test/test_kernel.c).
++ */
++#ifndef PAGANI_DIAG_H
++#define PAGANI_DIAG_H
++
++#include <stddef.h>
++#include <stdint.h>
++
++#define PAGANI_DIAG_TEXT            200     /* one U record (BootProgress RAMOOPS_LOG_TEXT_MAX); a longer line continues in '+' records */
++#define PAGANI_DIAG_PREFIX          "diag: "
++#define PAGANI_DIAG_BOOT_LINES      300
++#define PAGANI_DIAG_WINDOW_LINES    20
++#define PAGANI_DIAG_WINDOW_SECONDS  10
++#define PAGANI_DIAG_SILENCE_SECONDS 90      /* after the launch: one line when the daemon has written nothing by then */
++#define PAGANI_DIAG_DAEMON          "/private/var/ngpu/bin/paganidiag"
++#define PAGANI_DIAG_HOST            "/usr/libexec/DumpPanic"
++
++enum {
++	PAGANI_DIAG_TAKEN = 0,
++	PAGANI_DIAG_OVER_WINDOW = 1,
++	PAGANI_DIAG_OVER_BOOT = 2,
++};
++
++/* The limits: when the last PAGANI_DIAG_WINDOW_LINES accepted lines came (a ring, oldest at lines % PAGANI_DIAG_WINDOW_LINES), how many
++ * were accepted and how many refused. */
++struct pagani_diag_limit {
++	uint64_t times[PAGANI_DIAG_WINDOW_LINES];
++	uint32_t lines;
++	uint32_t dropped;
++	uint32_t noted;                     /* the first refusal has been logged */
++};
++
++/* Whether a line written at `now` is logged; `window` is PAGANI_DIAG_WINDOW_SECONDS in the unit of `now`. Never more than
++ * PAGANI_DIAG_WINDOW_LINES accepted lines lie within any `window`. */
++static inline int
++pagani_diag_take(struct pagani_diag_limit *limit, uint64_t now, uint64_t window)
++{
++	uint32_t oldest = limit->lines % PAGANI_DIAG_WINDOW_LINES;
++	if (limit->lines >= PAGANI_DIAG_BOOT_LINES) {
++		limit->dropped++;
++		return PAGANI_DIAG_OVER_BOOT;
++	}
++	if (limit->lines >= PAGANI_DIAG_WINDOW_LINES && now - limit->times[oldest] < window) {
++		limit->dropped++;
++		return PAGANI_DIAG_OVER_WINDOW;
++	}
++	limit->times[oldest] = now;
++	limit->lines++;
++	return PAGANI_DIAG_TAKEN;
++}
++
++/* The U line of a written text (n bytes, not necessarily terminated): "diag: " and the text as described above. `line` holds
++ * PAGANI_DIAG_TEXT + 1 bytes; returns the line's length, or 0 for an empty text. */
++static inline size_t
++pagani_diag_line(char *line, const char *text, size_t n)
++{
++	static const char prefix[] = PAGANI_DIAG_PREFIX;
++	const size_t prefix_length = sizeof(prefix) - 1;
++	size_t used = 0, at = 0;
++	if (n >= prefix_length) {
++		size_t i = 0;
++		while (i < prefix_length && text[i] == prefix[i]) {
++			i++;
++		}
++		if (i == prefix_length) {
++			at = prefix_length;
++		}
++	}
++	if (at >= n || text[at] == '\0' || text[at] == '\n' || text[at] == '\r') {
++		line[0] = '\0';
++		return 0;
++	}
++	while (used < prefix_length) {
++		line[used] = prefix[used];
++		used++;
++	}
++	for (; at < n && used < PAGANI_DIAG_TEXT; at++) {
++		unsigned char c = (unsigned char)text[at];
++		if (c == '\0' || c == '\n' || c == '\r') {
++			break;
++		}
++		line[used++] = (c < 0x20 || c >= 0x7f) ? ' ' : (char)c;
++	}
++	line[used] = '\0';
++	return used;
++}
++
++#endif /* PAGANI_DIAG_H */

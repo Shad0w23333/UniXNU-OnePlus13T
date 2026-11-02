@@ -1,0 +1,7 @@
+--- a/patches/xnu/series
++++ b/patches/xnu/series
+@@ -17,3 +17,4 @@
+ phone-diag-sysctl.patch
+ phone-controlcenter-settings.patch
+ phone-system-apps-view.patch
++phone-haptics-overlays.patch
