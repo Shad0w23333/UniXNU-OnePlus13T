@@ -29,6 +29,20 @@
 | `patches/` | UEFI（Mu-Silicium）的改动 |
 | `docs/` | 功能盘点、测试清单、路线图 |
 
+## 各组件仓库（带完整提交历史，按 UniXNU 官方结构）
+
+这里是方便浏览的合集。要改哪一块、要给上游提 PR，就去对应的组件仓库：
+
+| 仓库 | 内容 |
+| --- | --- |
+| [Shad0w23333/UniXNU-Pagani_SM8750](https://github.com/Shad0w23333/UniXNU-Pagani_SM8750) | 设备仓库（`board.toml`、`porting.toml`、XNU 补丁），UniXNU 官网据此生成一加 13T 页面 |
+| [Shad0w23333/Adreno830](https://github.com/Shad0w23333/Adreno830) | Adreno 830 GPU 驱动 |
+| [Shad0w23333/UniXNU-Pagani-Drivers](https://github.com/Shad0w23333/UniXNU-Pagani-Drivers) | 外设驱动 |
+| [Shad0w23333/UniXNU-sm8750-common](https://github.com/Shad0w23333/UniXNU-sm8750-common) | SM8750 公共层 |
+| [Shad0w23333/UniXNU_Enc3l](https://github.com/Shad0w23333/UniXNU_Enc3l) | 构建器，组件目录已指向上面这些仓库 |
+
+前四个衍生自 [IssacL04](https://github.com/IssacL04) 的 Pagani 系列，构建器衍生自 UniXNU。
+
 ## 怎么用（简版）
 
 **准备**：Apple 芯片的 Mac，Xcode 命令行工具，Python 3，`brew install llvm`，[ipsw](https://github.com/blacktop/ipsw)，adb 和 fastboot；一加 13T 已解锁 BL。
